@@ -41,7 +41,7 @@ inductive derivable :: "tm set \<Rightarrow> tm \<Rightarrow> bool" where
             \<Longrightarrow> derivable \<Gamma> (mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))"
 | beta:   "has_type \<Sigma> [] (Abs \<sigma> b) (funT \<sigma> \<tau>)
             \<Longrightarrow> derivable {} (mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b))"
-| "assume": "has_type \<Sigma> [] p boolT \<Longrightarrow> derivable {p} p"
+| assm: "has_type \<Sigma> [] p boolT \<Longrightarrow> derivable {p} p"
 | eq_mp:  "derivable \<Gamma> (mk_eq boolT p q) \<Longrightarrow> derivable \<Delta> p \<Longrightarrow> derivable (\<Gamma> \<union> \<Delta>) q"
 | deduct_antisym: "derivable \<Gamma> p \<Longrightarrow> derivable \<Delta> q
             \<Longrightarrow> derivable ((\<Gamma> - {q}) \<union> (\<Delta> - {p})) (mk_eq boolT p q)"
@@ -103,7 +103,7 @@ next
   from has_type_wf[OF sig_ok _ app] have "wf_ty \<Sigma> \<tau>" by simp
   with app b' show ?case by (simp add: has_type_mk_eq_iff[OF sig_ok])
 next
-  case ("assume" p)
+  case (assm p)
   then show ?case by simp
 next
   case (eq_mp \<Gamma> p q \<Delta>)
