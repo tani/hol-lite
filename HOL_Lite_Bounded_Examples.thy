@@ -1,5 +1,5 @@
 theory HOL_Lite_Bounded_Examples
-  imports HOL_Lite_Executable_Waterfall HOL_Lite_Derived
+  imports HOL_Lite_Waterfall
 begin
 
 definition empty_axs :: "name set \<Rightarrow> nat \<Rightarrow> tm list" where

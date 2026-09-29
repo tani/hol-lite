@@ -289,7 +289,7 @@ text \<open>For a fixed finite name set and size radius, iterating exactly the c
   is needed. The final existential equivalence ranges over all such regions and is not
   a decision procedure for unrestricted derivability. In particular, the set operators,
   finite representatives, and axiom oracle require executable implementations.
-  HOL_Lite_Executable_Waterfall supplies these for a finite name list and an axiom
+  HOL_Lite_Waterfall supplies these for a finite name list and an axiom
   enumerator satisfying hol_lite_axs; this theorem alone does not run the search.\<close>
 
 theorem bounded_iteration_iff_bderiv:
