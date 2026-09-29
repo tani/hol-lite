@@ -5,3 +5,5 @@ session "HOL-Lite" = HOL +
     HOL_Lite_Typing
     HOL_Lite_Kernel
     HOL_Lite_Derived
+    HOL_Lite_Check
+    HOL_Lite_Waterfall
