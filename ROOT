@@ -18,4 +18,5 @@ session "HOL-Lite" = HOL +
     HOL_Lite_Saturation
     HOL_Lite_Waterfall
     HOL_Lite_Flood
+    HOL_Lite_Guided_Flood
     HOL_Lite_Bounded_Examples
