@@ -1,5 +1,5 @@
 theory HOL_Lite_Guided_Examples
-  imports HOL_Lite_Guided_Flood HOL_Lite_Bounded_Examples
+  imports HOL_Lite_Guided_Auto HOL_Lite_Bounded_Examples
 begin
 
 section \<open>Guided flood on goals of realistic size\<close>
@@ -77,5 +77,78 @@ lemma derivable_mp: "hol_lite.derivable base_hsig {} {pq, tp} tq"
 
 lemma derivable_sym: "hol_lite.derivable base_hsig {} {pq} qp"
   using hol_lite_axs.gflood_decide_sound[OF guided_locale sym_found] .
+
+section \<open>Backward decomposition and guided flood together\<close>
+
+text \<open>
+  The staged prover of @{text HOL_Lite_Guided_Auto}: the waterfall decomposes the goal, and the
+  guided flood on a generated universe finishes what is left.  No universe is written by hand.
+\<close>
+
+definition tr :: tm where "tr = Fv ''r'' boolT"
+definition ts :: tm where "ts = Fv ''s'' boolT"
+definition qr :: tm where "qr = mk_eq boolT tq tr"
+definition rs :: tm where "rs = mk_eq boolT tr ts"
+definition ps :: tm where "ps = mk_eq boolT tp ts"
+definition rp :: tm where "rp = mk_eq boolT tr tp"
+
+abbreviation auto_procs :: "nat \<Rightarrow> processor list" where
+  "auto_procs k \<equiv> default_procs base_hsig @ [g_auto_processor base_hsig empty_axs k]"
+
+text \<open>Modus ponens for an equation: needs forward reasoning, found from the subterms alone.\<close>
+
+lemma auto_mp: "waterfall 5 (auto_procs 0) ([pq, tp], tq) = []"
+  by eval
+
+text \<open>
+  A chain of three hypotheses: the flood needs @{text "p = r"} and @{text "q = s"}, which the
+  first generation round adds (transitive closure of the equations).  With no round the
+  universe is just the subterms and the goal is left open.
+\<close>
+
+lemma auto_chain_needs_a_round: "waterfall 5 (auto_procs 0) ([pq, qr, rs], ps) \<noteq> []"
+  by eval
+
+lemma auto_chain: "waterfall 5 (auto_procs (Suc 0)) ([pq, qr, rs], ps) = []"
+  by eval
+
+text \<open>Symmetry of both hypotheses and then transitivity: one generation round.\<close>
+
+lemma auto_sym_trans: "waterfall 5 (auto_procs 1) ([pq, qr], rp) = []"
+  by eval
+
+text \<open>Hypotheses that the proof does not use are allowed.\<close>
+
+lemma auto_unused_hyps: "waterfall 5 (auto_procs 0) ([pq, tp, tr, rs], tq) = []"
+  by eval
+
+text \<open>
+  A goal that is not derivable is not closed; it comes back as a residual.  The full flood
+  cannot refute it either (@{text g_full_complete} only promises to find provable goals).
+\<close>
+
+lemma auto_not_provable:
+  "waterfall 5 (auto_procs 1) ([pq], mk_eq boolT tp tr) \<noteq> []"
+  by eval
+
+text \<open>The complete stage is the full-region flood, on a goal small enough for its region.\<close>
+
+lemma full_stage_small:
+  "g_full_processor base_hsig empty_axs [''bool'', ''p''] 2 ([Fv ''p'' boolT], Fv ''p'' boolT) = Closed"
+  by eval
+
+lemma auto_prove_mp:
+  "g_prove base_hsig empty_axs 0 [''bool'', ''p''] 2 5 ([pq, tp], tq)"
+  by eval
+
+text \<open>The successes are derivability theorems.\<close>
+
+lemma derivable_chain_proves: "\<exists>\<Gamma>. \<Gamma> \<subseteq> {pq, qr, rs} \<and> hol_lite.derivable base_hsig {} \<Gamma> ps"
+proof -
+  have "hol_lite.provable base_hsig {} ([pq, qr, rs], ps)"
+    by (rule hol_lite_axs.g_prove_sound[OF guided_locale, where k = 1 and ns = "[]" and r = 0 and n = 5])
+       (simp add: g_prove_def auto_chain)
+  then show ?thesis by (simp add: hol_lite.provable_iff)
+qed
 
 end
