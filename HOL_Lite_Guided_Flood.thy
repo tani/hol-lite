@@ -733,6 +733,105 @@ next
   with closed show ?case by blast
 qed
 
+lemma finite_Sequent_U: "finite U \<Longrightarrow> finite (Sequent_U U)"
+  by (simp add: Sequent_U_def)
+
+lemma card_Sequent_U:
+  "finite U \<Longrightarrow> card (Sequent_U U) = 2 ^ card U * card U"
+  by (simp add: Sequent_U_def card_Pow card_cartesian_product)
+
+text \<open>
+  Within @{text "card (Sequent_U U)"} rounds the saturation reaches a fixed point: each round
+  either adds a sequent of the finite region or stops.
+\<close>
+
+lemma g_rounds_closed:
+  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and fin: "finite (set W)"
+  shows "\<forall>p\<in>set S. gderiv (set W) p \<Longrightarrow>
+         card (Sequent_U (set W)) \<le> card (set S) + k \<Longrightarrow>
+         set (g_step \<Sigma> axs ns r W (g_rounds \<Sigma> axs ns r W k S)) \<subseteq> set (g_rounds \<Sigma> axs ns r W k S)"
+proof (induction k arbitrary: S)
+  case 0
+  have finR: "finite (Sequent_U (set W))" using fin by (rule finite_Sequent_U)
+  have sub: "set S \<subseteq> Sequent_U (set W)" using 0(1) gderiv_region by blast
+  have eq: "set S = Sequent_U (set W)"
+    using card_seteq[OF finR sub] 0(2) by simp
+  have "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
+    using g_step_sound[OF 0(1) Wt] .
+  then have "set (g_step \<Sigma> axs ns r W S) \<subseteq> Sequent_U (set W)"
+    using gderiv_region by blast
+  then show ?case using eq by simp
+next
+  case (Suc k)
+  let ?T = "remdups (S @ g_step \<Sigma> axs ns r W S)"
+  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
+    using g_step_sound[OF Suc.prems(1) Wt] .
+  have gT: "\<forall>p\<in>set ?T. gderiv (set W) p" using Suc.prems(1) stepS by auto
+  show ?case
+  proof (cases "set ?T = set S")
+    case True
+    then show ?thesis by (auto simp: Let_def)
+  next
+    case False
+    have finR: "finite (Sequent_U (set W))" using fin by (rule finite_Sequent_U)
+    have subT: "set ?T \<subseteq> Sequent_U (set W)" using gT gderiv_region by blast
+    have finT: "finite (set ?T)" by simp
+    have psub: "set S \<subset> set ?T" using False by auto
+    have "card (set S) < card (set ?T)" by (rule psubset_card_mono[OF finT psub])
+    then have "card (Sequent_U (set W)) \<le> card (set ?T) + k" using Suc.prems(2) by simp
+    from Suc.IH[OF gT this] False show ?thesis by (simp add: Let_def)
+  qed
+qed
+
+theorem gflood_decide_iff_gderiv:
+  "gflood_decide \<Sigma> axs ns r U p \<longleftrightarrow> gderiv (set U \<inter> Tm_wt (set ns) \<Sigma> r) p"
+proof -
+  define W where "W = g_universe \<Sigma> ns r U"
+  have setW: "set W = set U \<inter> Tm_wt (set ns) \<Sigma> r" unfolding W_def by (rule set_g_universe)
+  have Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" using setW by simp
+  have fin: "finite (set W)" by simp
+  have dist: "distinct W" unfolding W_def by (rule distinct_g_universe)
+  have bound: "g_bound W = card (Sequent_U (set W))"
+    using card_Sequent_U[OF fin] distinct_card[OF dist] by (simp add: g_bound_def)
+  have rounds: "\<forall>x\<in>set (g_rounds \<Sigma> axs ns r W (g_bound W) []). gderiv (set W) x"
+    by (rule g_rounds_sound[OF Wt]) simp
+  show ?thesis unfolding gflood_decide_def Let_def W_def[symmetric] setW[symmetric]
+  proof
+    assume "p \<in> set (g_rounds \<Sigma> axs ns r W (g_bound W) [])"
+    with rounds show "gderiv (set W) p" by blast
+  next
+    assume p: "gderiv (set W) p"
+    let ?F = "g_rounds \<Sigma> axs ns r W (g_bound W) []"
+    have closed: "set (g_step \<Sigma> axs ns r W ?F) \<subseteq> set ?F"
+      by (rule g_rounds_closed[OF Wt fin]) (simp_all add: bound)
+    have Fsub: "set ?F \<subseteq> Sequent_U (set W)" using rounds gderiv_region by blast
+    from closed_contains_gderiv[OF Wt Fsub closed p] show "p \<in> set ?F" .
+  qed
+qed
+
+corollary gflood_decide_sound:
+  "gflood_decide \<Sigma> axs ns r U (\<Gamma>, c) \<Longrightarrow> derivable \<Gamma> c"
+  using gflood_decide_iff_gderiv gderiv_sound by blast
+
+corollary gflood_decide_complete_in_limit:
+  "derivable \<Gamma> c \<longleftrightarrow> (\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c))"
+proof
+  assume "derivable \<Gamma> c"
+  then obtain N r where fN: "finite N" and b: "bderiv N r (\<Gamma>, c)"
+    using derivable_iff_bderiv by blast
+  obtain ns where ns: "set ns = N" using finite_list[OF fN] by blast
+  have g: "gderiv (Tm_wt (set ns) \<Sigma> r) (\<Gamma>, c)"
+    using b ns by (simp add: bderiv_iff_gderiv)
+  have "set (enum_tm ns \<Sigma> r) \<inter> Tm_wt (set ns) \<Sigma> r = Tm_wt (set ns) \<Sigma> r"
+    by (simp add: set_enum_tm)
+  then have "gflood_decide \<Sigma> axs ns r (enum_tm ns \<Sigma> r) (\<Gamma>, c)"
+    using g gflood_decide_iff_gderiv by simp
+  then show "\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c)" by blast
+next
+  assume "\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c)"
+  then show "derivable \<Gamma> c" using gflood_decide_sound by blast
+qed
+
 end
 
 end
