@@ -12,6 +12,7 @@ session "HOL-Lite" = HOL +
     HOL_Lite_Checker_Completeness
     HOL_Lite_Finite_Type_Instantiation
     HOL_Lite_Bounded_Derivation
+    HOL_Lite_Guided_Derivation
     HOL_Lite_Step_Operators_Core
     HOL_Lite_Step_Operators_Abs_Inst
     HOL_Lite_Saturation
