@@ -264,4 +264,300 @@ lemma g_axiom_cover:
 
 end
 
+subsection \<open>Abstraction and type instantiation over a universe\<close>
+
+text \<open>
+  An abstraction conclusion is decoded from the universe: @{text dest_abs_eq} recognises
+  @{text "mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> a) (Abs \<sigma> b)"}.  The bound name only has to range over the names in
+  use and one fresh name: a name that occurs free in the equation must already be in use, and
+  when it does not occur the result does not depend on it.
+
+  For type instantiation the range of the substitution is the set of subtypes of the type
+  annotations occurring in the universe: the conclusion contains @{text "\<theta> a"} inside an
+  annotation whenever @{text a} occurs in the premise.
+\<close>
+
+definition dest_abs_eq :: "tm \<Rightarrow> (ty \<times> ty \<times> tm \<times> tm) option" where
+  "dest_abs_eq c = (case HOL_Lite_Waterfall.dest_eq c of
+      Some (TyApp fn [\<sigma>,\<tau>], Abs \<sigma>1 a, Abs \<sigma>2 b) \<Rightarrow>
+        if fn = ''fun'' \<and> \<sigma>1 = \<sigma> \<and> \<sigma>2 = \<sigma> then Some (\<sigma>, \<tau>, a, b) else None
+    | _ \<Rightarrow> None)"
+
+definition abs_one :: "name list \<Rightarrow> hsig \<Rightarrow> (tm set \<times> tm) \<Rightarrow> tm \<Rightarrow> (tm set \<times> tm) list" where
+  "abs_one ns \<Sigma> p1 c = (case (HOL_Lite_Waterfall.dest_eq (snd p1), dest_abs_eq c) of
+      (Some (\<tau>,s,t), Some (\<sigma>,\<tau>',a,b)) \<Rightarrow>
+        if \<tau>' = \<tau> \<and> wf_ty \<Sigma> \<sigma> \<and>
+           (\<exists>x\<in>set (HOL_Lite_Waterfall.fresh_name ns # ns).
+              (\<forall>p\<in>fst p1. (x,\<sigma>) \<notin> fvs p) \<and> a = abs_fv 0 x \<sigma> s \<and> b = abs_fv 0 x \<sigma> t)
+        then [(fst p1, c)] else []
+    | _ \<Rightarrow> [])"
+
+definition g_abs :: "hsig \<Rightarrow> name list \<Rightarrow> tm list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_abs \<Sigma> ns W S = concat (map (\<lambda>p1. concat (map (abs_one ns \<Sigma> p1) W)) S)"
+
+fun subtys :: "ty \<Rightarrow> ty list" where
+  "subtys (TyVar a) = [TyVar a]"
+| "subtys (TyApp c ts) = TyApp c ts # concat (map subtys ts)"
+
+fun ann_tys :: "tm \<Rightarrow> ty list" where
+  "ann_tys (Fv x \<tau>) = [\<tau>]"
+| "ann_tys (Bv i) = []"
+| "ann_tys (Cst c \<tau>) = [\<tau>]"
+| "ann_tys (App f a) = ann_tys f @ ann_tys a"
+| "ann_tys (Abs \<tau> b) = \<tau> # ann_tys b"
+
+definition inst_tys :: "tm list \<Rightarrow> ty list" where
+  "inst_tys W = remdups (concat (map (\<lambda>t. concat (map subtys (ann_tys t))) W))"
+
+definition g_inst_vars :: "tm list \<Rightarrow> (tm set \<times> tm) \<Rightarrow> name list" where
+  "g_inst_vars W p = remdups (tm_tyvar_list (snd p) @
+    concat (map tm_tyvar_list (filter (\<lambda>t. t \<in> fst p) W)))"
+
+definition g_inst :: "tm list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_inst W S = concat (map (\<lambda>p1.
+    concat (map (\<lambda>e.
+      let \<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT);
+          q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))
+      in if in_reg W q then [q] else [])
+      (inst_envs (g_inst_vars W p1) (inst_tys W)))) S)"
+
+lemma subtys_self: "\<tau> \<in> set (subtys \<tau>)"
+  by (cases \<tau>) simp_all
+
+lemma tsubst_in_subtys: "a \<in> ty_tyvars \<tau> \<Longrightarrow> \<theta> a \<in> set (subtys (tsubst \<theta> \<tau>))"
+proof (induction \<tau> rule: ty.induct)
+  case (TyVar b)
+  then show ?case by (simp add: subtys_self)
+next
+  case (TyApp c ts)
+  then obtain t where t: "t \<in> set ts" "a \<in> ty_tyvars t" by auto
+  from TyApp.IH[OF t(1) t(2)] t(1) show ?case by (auto simp: image_iff)
+qed
+
+lemma ann_tys_tinst:
+  "a \<in> tm_tyvars t \<Longrightarrow> \<exists>\<tau>\<in>set (ann_tys (tinst \<theta> t)). \<theta> a \<in> set (subtys \<tau>)"
+  by (induction t rule: tm.induct) (auto dest: tsubst_in_subtys)
+
+lemma inst_tys_mem:
+  "u \<in> set W \<Longrightarrow> \<tau> \<in> set (ann_tys u) \<Longrightarrow> x \<in> set (subtys \<tau>) \<Longrightarrow> x \<in> set (inst_tys W)"
+  unfolding inst_tys_def by (auto simp: set_concat image_iff intro!: bexI)
+
+context hol_lite_axs
+begin
+
+lemma gderiv_region: "gderiv U p \<Longrightarrow> p \<in> Sequent_U U"
+  by (induction rule: gderiv.induct) auto
+
+lemma dest_abs_eq_sound:
+  "dest_abs_eq c = Some (\<sigma>, \<tau>, a, b) \<Longrightarrow> c = mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> a) (Abs \<sigma> b)"
+  unfolding dest_abs_eq_def
+  by (auto split: option.splits prod.splits ty.splits list.splits tm.splits if_splits
+      dest!: HOL_Lite_Waterfall.dest_eq_sound)
+
+lemma dest_abs_eq_mk: "dest_abs_eq (mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> a) (Abs \<sigma> b)) = Some (\<sigma>, \<tau>, a, b)"
+  by (simp add: dest_abs_eq_def)
+
+lemma g_abs_sound:
+  assumes S: "\<forall>p\<in>set S. gderiv (set W) p"
+  shows "\<forall>q\<in>set (g_abs \<Sigma> ns W S). gderiv (set W) q"
+proof
+  fix q assume "q \<in> set (g_abs \<Sigma> ns W S)"
+  then obtain p1 c where p1: "p1 \<in> set S" and c: "c \<in> set W" and q: "q \<in> set (abs_one ns \<Sigma> p1 c)"
+    by (auto simp: g_abs_def set_concat)
+  obtain G e where p1e: "p1 = (G, e)" by (cases p1) auto
+  show "gderiv (set W) q"
+  proof (cases "HOL_Lite_Waterfall.dest_eq e")
+    case None
+    then show ?thesis using q p1e by (simp add: abs_one_def)
+  next
+    case (Some y)
+    obtain \<tau> s t where y: "y = (\<tau>, s, t)" by (cases y) auto
+    show ?thesis
+    proof (cases "dest_abs_eq c")
+      case None
+      then show ?thesis using q p1e Some y by (simp add: abs_one_def)
+    next
+      case (Some z)
+      obtain \<sigma> \<tau>' a b where z: "z = (\<sigma>, \<tau>', a, b)" by (cases z) auto
+      from q p1e \<open>HOL_Lite_Waterfall.dest_eq e = Some y\<close> y Some z obtain x where
+        conds: "\<tau>' = \<tau>" "wf_ty \<Sigma> \<sigma>" "\<forall>p\<in>G. (x,\<sigma>) \<notin> fvs p"
+          "a = abs_fv 0 x \<sigma> s" "b = abs_fv 0 x \<sigma> t" and qq: "q = (G, c)"
+        by (auto simp: abs_one_def split: if_splits)
+      have e: "e = mk_eq \<tau> s t" using HOL_Lite_Waterfall.dest_eq_sound \<open>HOL_Lite_Waterfall.dest_eq e = Some y\<close> y
+        by blast
+      have ce: "c = mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t))"
+        using dest_abs_eq_sound[OF \<open>dest_abs_eq c = Some z\<close>[unfolded z]] conds by simp
+      have prem: "gderiv (set W) (G, mk_eq \<tau> s t)" using S p1 p1e e by auto
+      have reg: "(G, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
+                 \<in> Sequent_U (set W)"
+        using gderiv_region[OF prem] c ce by (auto simp: Sequent_U_def)
+      show ?thesis using gderiv.gabs[OF prem conds(2) conds(3) reg] qq ce by simp
+    qed
+  qed
+qed
+
+
+lemma fvs_mk_eq [simp]: "fvs (mk_eq \<tau> s t) = fvs s \<union> fvs t"
+  by (simp add: mk_eq_def)
+
+lemma fv_name_in_universe:
+  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and u: "u \<in> set W" and fv: "(y, \<rho>) \<in> fvs u"
+  shows "y \<in> set ns"
+proof -
+  from u Wt have "u \<in> Tm (set ns) \<Sigma> r" by (auto simp: Tm_wt_def)
+  from Tm_fvs_name_mem[OF this fv] show ?thesis .
+qed
+
+lemma g_abs_cover:
+  assumes p: "(\<Gamma>, mk_eq \<tau> s t) \<in> set S" and Ssub: "set S \<subseteq> Sequent_U (set W)"
+    and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and wf: "wf_ty \<Sigma> \<sigma>"
+    and fresh: "\<forall>p\<in>\<Gamma>. (x, \<sigma>) \<notin> fvs p"
+    and concl: "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
+                \<in> Sequent_U (set W)"
+  shows "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
+         \<in> set (g_abs \<Sigma> ns W S)"
+proof -
+  let ?c = "mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t))"
+  have cW: "?c \<in> set W" using concl by (simp add: Sequent_U_def)
+  have eW: "mk_eq \<tau> s t \<in> set W" using p Ssub by (auto simp: Sequent_U_def)
+  have GW: "\<forall>g\<in>\<Gamma>. g \<in> set W" using p Ssub by (auto simp: Sequent_U_def)
+  have names: "\<exists>x'\<in>set (HOL_Lite_Waterfall.fresh_name ns # ns).
+      (\<forall>p\<in>\<Gamma>. (x', \<sigma>) \<notin> fvs p) \<and> abs_fv 0 x \<sigma> s = abs_fv 0 x' \<sigma> s \<and>
+      abs_fv 0 x \<sigma> t = abs_fv 0 x' \<sigma> t"
+  proof (cases "x \<in> set ns")
+    case True
+    then show ?thesis using fresh by (intro bexI[of _ x]) auto
+  next
+    case False
+    have xs: "(x, \<sigma>) \<notin> fvs s" and xt: "(x, \<sigma>) \<notin> fvs t"
+      using fv_name_in_universe[OF Wt eW, of x \<sigma>] False by auto
+    have fr: "HOL_Lite_Waterfall.fresh_name ns \<notin> set ns" by (rule HOL_Lite_Waterfall.fresh_name_fresh)
+    let ?x' = "HOL_Lite_Waterfall.fresh_name ns"
+    have xs': "(?x', \<sigma>) \<notin> fvs s" and xt': "(?x', \<sigma>) \<notin> fvs t"
+      using fv_name_in_universe[OF Wt eW, of ?x' \<sigma>] fr by auto
+    have xg: "\<forall>p\<in>\<Gamma>. (?x', \<sigma>) \<notin> fvs p"
+      using fv_name_in_universe[OF Wt] GW fr by blast
+    show ?thesis
+      using xg abs_fv_id[OF xs] abs_fv_id[OF xt] abs_fv_id[OF xs'] abs_fv_id[OF xt']
+      by (intro bexI[of _ ?x']) auto
+  qed
+  then obtain x' where x': "x' \<in> set (HOL_Lite_Waterfall.fresh_name ns # ns)"
+    "\<forall>p\<in>\<Gamma>. (x', \<sigma>) \<notin> fvs p" "abs_fv 0 x \<sigma> s = abs_fv 0 x' \<sigma> s"
+    "abs_fv 0 x \<sigma> t = abs_fv 0 x' \<sigma> t" by blast
+  have one: "abs_one ns \<Sigma> (\<Gamma>, mk_eq \<tau> s t) ?c = [(\<Gamma>, ?c)]"
+    using wf x' by (auto simp: abs_one_def dest_abs_eq_mk intro!: bexI[of _ x'])
+  show ?thesis
+    unfolding g_abs_def set_concat_map
+    by (rule UN_I[OF p], rule UN_I[OF cW]) (simp add: one)
+qed
+
+lemma subtys_wf: "wf_ty \<Sigma> \<tau> \<Longrightarrow> \<forall>u\<in>set (subtys \<tau>). wf_ty \<Sigma> u"
+  by (induction \<tau> rule: ty.induct) (auto simp: ball_Un)
+
+lemma ann_tys_wf: "wf_tm_ty \<Sigma> t \<Longrightarrow> \<forall>\<tau>\<in>set (ann_tys t). wf_ty \<Sigma> \<tau>"
+  by (induction t rule: tm.induct) auto
+
+lemma inst_tys_wf:
+  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>\<tau>\<in>set (inst_tys W). wf_ty \<Sigma> \<tau>"
+proof
+  fix \<tau> assume "\<tau> \<in> set (inst_tys W)"
+  then obtain u a where u: "u \<in> set W" and a: "a \<in> set (ann_tys u)" and \<tau>: "\<tau> \<in> set (subtys a)"
+    by (auto simp: inst_tys_def set_concat)
+  from u Wt obtain \<rho> where "typeof \<Sigma> [] u = Some \<rho>" by (auto simp: Tm_wt_def)
+  from has_type_wf_tm_ty[OF typeof_sound[OF this]] have "wf_tm_ty \<Sigma> u" .
+  with ann_tys_wf a have "wf_ty \<Sigma> a" by blast
+  with subtys_wf \<tau> show "wf_ty \<Sigma> \<tau>" by blast
+qed
+
+lemma set_g_inst_vars:
+  "fst p \<subseteq> set W \<Longrightarrow> set (g_inst_vars W p) = inst_vars p"
+  by (auto simp: g_inst_vars_def inst_vars_def subset_iff set_concat)
+
+lemma map_of_map_pair: "a \<in> set vs \<Longrightarrow> map_of (map (\<lambda>x. (x, f x)) vs) a = Some (f a)"
+  by (induction vs) auto
+
+lemma g_inst_sound:
+  assumes S: "\<forall>p\<in>set S. gderiv (set W) p" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>q\<in>set (g_inst W S). gderiv (set W) q"
+proof
+  fix q assume "q \<in> set (g_inst W S)"
+  then obtain p1 e where p1: "p1 \<in> set S"
+    and e: "e \<in> set (inst_envs (g_inst_vars W p1) (inst_tys W))"
+    and q: "q \<in> set (let \<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT);
+          q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))
+        in if in_reg W q then [q] else [])"
+    by (auto simp: g_inst_def set_concat_map)
+  define \<theta> where "\<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT)"
+  have qe: "q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))"
+    and reg: "in_reg W (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))"
+    using q by (auto simp: \<theta>_def Let_def split: if_splits)
+  have ran: "set (map snd e) \<subseteq> set (inst_tys W)" using e by (simp add: set_inst_envs)
+  have wf\<theta>: "\<And>a. wf_ty \<Sigma> (\<theta> a)"
+  proof -
+    fix a
+    show "wf_ty \<Sigma> (\<theta> a)"
+    proof (cases "map_of e a")
+      case None
+      then show ?thesis using wf_boolT[OF sig_ok] by (simp add: \<theta>_def)
+    next
+      case (Some t)
+      from map_of_range[OF Some] have "t \<in> set (map snd e)" .
+      then have "t \<in> set (inst_tys W)" by (rule rev_subsetD[OF _ ran])
+      then show ?thesis using inst_tys_wf[OF Wt] Some by (simp add: \<theta>_def)
+    qed
+  qed
+  obtain G c where p1e: "p1 = (G, c)" by (cases p1) auto
+  from S p1 p1e have prem: "gderiv (set W) (G, c)" by auto
+  from reg p1e have "(tinst \<theta> ` G, tinst \<theta> c) \<in> Sequent_U (set W)" by simp
+  from gderiv.ginst_type[OF prem wf\<theta> this] show "gderiv (set W) q" using qe p1e by simp
+qed
+
+lemma g_inst_cover:
+  assumes p: "(\<Gamma>, c) \<in> set S" and Ssub: "set S \<subseteq> Sequent_U (set W)"
+    and concl: "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> Sequent_U (set W)"
+  shows "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst W S)"
+proof -
+  have GW: "\<Gamma> \<subseteq> set W" using p Ssub by (auto simp: Sequent_U_def)
+  let ?vars = "g_inst_vars W (\<Gamma>, c)"
+  have V: "set ?vars = tm_tyvars c \<union> (\<Union>t\<in>\<Gamma>. tm_tyvars t)"
+    using set_g_inst_vars[of "(\<Gamma>, c)" W] GW by (simp add: inst_vars_def)
+  have cW': "tinst \<theta> c \<in> set W" using concl by (simp add: Sequent_U_def)
+  have GW': "\<And>g. g \<in> \<Gamma> \<Longrightarrow> tinst \<theta> g \<in> set W" using concl by (auto simp: Sequent_U_def)
+  have tyl: "\<And>a. a \<in> set ?vars \<Longrightarrow> \<theta> a \<in> set (inst_tys W)"
+  proof -
+    fix a assume a: "a \<in> set ?vars"
+    from a V have "a \<in> tm_tyvars c \<or> (\<exists>g\<in>\<Gamma>. a \<in> tm_tyvars g)" by auto
+    then show "\<theta> a \<in> set (inst_tys W)"
+    proof
+      assume "a \<in> tm_tyvars c"
+      from ann_tys_tinst[OF this] obtain \<tau> where "\<tau> \<in> set (ann_tys (tinst \<theta> c))"
+        "\<theta> a \<in> set (subtys \<tau>)" by blast
+      with inst_tys_mem[OF cW'] show ?thesis by blast
+    next
+      assume "\<exists>g\<in>\<Gamma>. a \<in> tm_tyvars g"
+      then obtain g where g: "g \<in> \<Gamma>" "a \<in> tm_tyvars g" by blast
+      from ann_tys_tinst[OF g(2)] obtain \<tau> where "\<tau> \<in> set (ann_tys (tinst \<theta> g))"
+        "\<theta> a \<in> set (subtys \<tau>)" by blast
+      with inst_tys_mem[OF GW'[OF g(1)]] show ?thesis by blast
+    qed
+  qed
+  let ?e = "map (\<lambda>a. (a, \<theta> a)) ?vars"
+  have emem: "?e \<in> set (inst_envs ?vars (inst_tys W))"
+    using tyl by (auto simp: set_inst_envs comp_def)
+  define \<theta>' where "\<theta>' = (\<lambda>a. case map_of ?e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT)"
+  have agree: "\<And>a. a \<in> set ?vars \<Longrightarrow> \<theta>' a = \<theta> a"
+    by (simp add: \<theta>'_def map_of_map_pair)
+  have cc: "tinst \<theta>' c = tinst \<theta> c"
+    by (rule tinst_cong) (use V agree in auto)
+  have gg: "\<And>g. g \<in> \<Gamma> \<Longrightarrow> tinst \<theta>' g = tinst \<theta> g"
+    by (rule tinst_cong) (use V agree in auto)
+  have img: "tinst \<theta>' ` \<Gamma> = tinst \<theta> ` \<Gamma>" using gg by (auto simp: image_iff)
+  show ?thesis
+    unfolding g_inst_def set_concat_map
+    by (rule UN_I[OF p], rule UN_I[OF emem]) (simp add: \<theta>'_def[symmetric] Let_def img cc concl)
+qed
+
+end
+
 end
