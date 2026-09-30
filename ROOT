@@ -20,3 +20,4 @@ session "HOL-Lite" = HOL +
     HOL_Lite_Flood
     HOL_Lite_Guided_Flood
     HOL_Lite_Bounded_Examples
+    HOL_Lite_Guided_Examples

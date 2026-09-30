@@ -17,8 +17,8 @@ text \<open>
 
 subsection \<open>Executable rule steps over a universe\<close>
 
-definition in_reg :: "tm list \<Rightarrow> (tm set \<times> tm) \<Rightarrow> bool" where
-  "in_reg W q = ((\<forall>h\<in>fst q. h \<in> set W) \<and> snd q \<in> set W)"
+definition in_reg :: "tm list \<Rightarrow> tm list \<Rightarrow> (tm set \<times> tm) \<Rightarrow> bool" where
+  "in_reg H W q = ((\<forall>h\<in>fst q. h \<in> set H) \<and> snd q \<in> set W)"
 
 lemma wdest_eq_mk_eq [simp]: "HOL_Lite_Waterfall.dest_eq (mk_eq \<tau> s t) = Some (\<tau>, s, t)"
   by (simp add: mk_eq_def)
@@ -26,17 +26,17 @@ lemma wdest_eq_mk_eq [simp]: "HOL_Lite_Waterfall.dest_eq (mk_eq \<tau> s t) = So
 definition typed_as :: "hsig \<Rightarrow> tm \<Rightarrow> ty \<Rightarrow> bool" where
   "typed_as \<Sigma> t \<tau> = (typeof \<Sigma> [] t = Some \<tau>)"
 
-definition gscan :: "tm list \<Rightarrow> ((tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) option) \<Rightarrow>
+definition gscan :: "tm list \<Rightarrow> tm list \<Rightarrow> ((tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) option) \<Rightarrow>
     (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
-  "gscan W f S = concat (map (\<lambda>p1. concat (map (\<lambda>p2. case f p1 p2 of
-    None \<Rightarrow> [] | Some q \<Rightarrow> if in_reg W q then [q] else []) S)) S)"
+  "gscan H W f S = concat (map (\<lambda>p1. concat (map (\<lambda>p2. case f p1 p2 of
+    None \<Rightarrow> [] | Some q \<Rightarrow> if in_reg H W q then [q] else []) S)) S)"
 
 lemma set_gscan:
-  "set (gscan W f S) = (\<Union>p1\<in>set S. \<Union>p2\<in>set S. case f p1 p2 of
-     None \<Rightarrow> {} | Some q \<Rightarrow> if in_reg W q then {q} else {})"
+  "set (gscan H W f S) = (\<Union>p1\<in>set S. \<Union>p2\<in>set S. case f p1 p2 of
+     None \<Rightarrow> {} | Some q \<Rightarrow> if in_reg H W q then {q} else {})"
 proof -
-  have per: "\<And>p1 p2. set (case f p1 p2 of None \<Rightarrow> [] | Some q \<Rightarrow> if in_reg W q then [q] else []) =
-     (case f p1 p2 of None \<Rightarrow> {} | Some q \<Rightarrow> if in_reg W q then {q} else {})"
+  have per: "\<And>p1 p2. set (case f p1 p2 of None \<Rightarrow> [] | Some q \<Rightarrow> if in_reg H W q then [q] else []) =
+     (case f p1 p2 of None \<Rightarrow> {} | Some q \<Rightarrow> if in_reg H W q then {q} else {})"
     by (simp split: option.splits)
   show ?thesis unfolding gscan_def using per by (simp add: set_concat_map)
 qed
@@ -68,8 +68,9 @@ definition g_refl :: "hsig \<Rightarrow> tm list \<Rightarrow> (tm set \<times> 
       Some (\<tau>,s,t) \<Rightarrow> if s = t \<and> typed_as \<Sigma> s \<tau> then [({}, c)] else []
     | None \<Rightarrow> []) W)"
 
-definition g_assm :: "hsig \<Rightarrow> tm list \<Rightarrow> (tm set \<times> tm) list" where
-  "g_assm \<Sigma> W = map (\<lambda>p. ({p}, p)) (filter (\<lambda>p. typed_as \<Sigma> p boolT) W)"
+definition g_assm :: "hsig \<Rightarrow> tm list \<Rightarrow> tm list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_assm \<Sigma> H W =
+     map (\<lambda>p. ({p}, p)) (filter (\<lambda>p. typed_as \<Sigma> p boolT \<and> p \<in> set H) W)"
 
 definition beta_one :: "hsig \<Rightarrow> tm \<Rightarrow> (tm set \<times> tm) list" where
   "beta_one \<Sigma> c = (case HOL_Lite_Waterfall.dest_eq c of
@@ -93,8 +94,8 @@ subsection \<open>Soundness and coverage of the rule steps\<close>
 context hol_lite_axs
 begin
 
-lemma in_reg_iff [simp]: "in_reg W q \<longleftrightarrow> q \<in> Sequent_U (set W)"
-  by (cases q) (simp add: in_reg_def Sequent_U_def subset_eq)
+lemma in_reg_iff [simp]: "in_reg H W q \<longleftrightarrow> q \<in> Sequent_HU (set H) (set W)"
+  by (cases q) (simp add: in_reg_def Sequent_HU_def subset_eq)
 
 lemma typed_as_sound: "typed_as \<Sigma> t \<tau> \<Longrightarrow> has_type \<Sigma> [] t \<tau>"
   unfolding typed_as_def by (rule typeof_sound)
@@ -103,43 +104,43 @@ lemma typed_as_complete: "has_type \<Sigma> [] t \<tau> \<Longrightarrow> typed_
   unfolding typed_as_def by (rule typeof_complete)
 
 lemma gscan_sound:
-  assumes f: "\<And>p1 p2 q. f p1 p2 = Some q \<Longrightarrow> gderiv (set W) p1 \<Longrightarrow> gderiv (set W) p2 \<Longrightarrow>
-                q \<in> Sequent_U (set W) \<Longrightarrow> gderiv (set W) q"
-    and S: "\<forall>p\<in>set S. gderiv (set W) p"
-  shows "\<forall>q\<in>set (gscan W f S). gderiv (set W) q"
+  assumes f: "\<And>p1 p2 q. f p1 p2 = Some q \<Longrightarrow> gderiv (set H) (set W) p1 \<Longrightarrow> gderiv (set H) (set W) p2 \<Longrightarrow>
+                q \<in> Sequent_HU (set H) (set W) \<Longrightarrow> gderiv (set H) (set W) q"
+    and S: "\<forall>p\<in>set S. gderiv (set H) (set W) p"
+  shows "\<forall>q\<in>set (gscan H W f S). gderiv (set H) (set W) q"
   using S by (auto simp: set_gscan split: option.splits if_splits intro: f)
 
 lemma gscan_cover:
-  assumes "p1 \<in> set S" "p2 \<in> set S" "f p1 p2 = Some q" "q \<in> Sequent_U (set W)"
-  shows "q \<in> set (gscan W f S)"
+  assumes "p1 \<in> set S" "p2 \<in> set S" "f p1 p2 = Some q" "q \<in> Sequent_HU (set H) (set W)"
+  shows "q \<in> set (gscan H W f S)"
   unfolding set_gscan
   by (rule UN_I[OF assms(1)], rule UN_I[OF assms(2)]) (use assms in simp)
 
 text \<open>The bridge to the derivation rules: the conclusion of every instance lies in the region.\<close>
 
 lemma trans_fn_sound:
-  "trans_fn p1 p2 = Some q \<Longrightarrow> gderiv U p1 \<Longrightarrow> gderiv U p2 \<Longrightarrow> q \<in> Sequent_U U \<Longrightarrow> gderiv U q"
+  "trans_fn p1 p2 = Some q \<Longrightarrow> gderiv H U p1 \<Longrightarrow> gderiv H U p2 \<Longrightarrow> q \<in> Sequent_HU H U \<Longrightarrow> gderiv H U q"
   unfolding trans_fn_def
   by (cases p1; cases p2)
      (auto split: option.splits prod.splits if_splits dest!: HOL_Lite_Waterfall.dest_eq_sound
       intro: gderiv.gtrans)
 
 lemma mk_comb_fn_sound:
-  "mk_comb_fn p1 p2 = Some q \<Longrightarrow> gderiv U p1 \<Longrightarrow> gderiv U p2 \<Longrightarrow> q \<in> Sequent_U U \<Longrightarrow> gderiv U q"
+  "mk_comb_fn p1 p2 = Some q \<Longrightarrow> gderiv H U p1 \<Longrightarrow> gderiv H U p2 \<Longrightarrow> q \<in> Sequent_HU H U \<Longrightarrow> gderiv H U q"
   unfolding mk_comb_fn_def
   by (cases p1; cases p2)
      (auto split: option.splits prod.splits ty.splits list.splits if_splits
       dest!: HOL_Lite_Waterfall.dest_eq_sound intro: gderiv.gmk_comb)
 
 lemma eq_mp_fn_sound:
-  "eq_mp_fn p1 p2 = Some q \<Longrightarrow> gderiv U p1 \<Longrightarrow> gderiv U p2 \<Longrightarrow> q \<in> Sequent_U U \<Longrightarrow> gderiv U q"
+  "eq_mp_fn p1 p2 = Some q \<Longrightarrow> gderiv H U p1 \<Longrightarrow> gderiv H U p2 \<Longrightarrow> q \<in> Sequent_HU H U \<Longrightarrow> gderiv H U q"
   unfolding eq_mp_fn_def
   by (cases p1; cases p2)
      (auto split: option.splits prod.splits if_splits dest!: HOL_Lite_Waterfall.dest_eq_sound
       intro: gderiv.geq_mp)
 
 lemma antisym_fn_sound:
-  "antisym_fn p1 p2 = Some q \<Longrightarrow> gderiv U p1 \<Longrightarrow> gderiv U p2 \<Longrightarrow> q \<in> Sequent_U U \<Longrightarrow> gderiv U q"
+  "antisym_fn p1 p2 = Some q \<Longrightarrow> gderiv H U p1 \<Longrightarrow> gderiv H U p2 \<Longrightarrow> q \<in> Sequent_HU H U \<Longrightarrow> gderiv H U q"
   unfolding antisym_fn_def
   by (cases p1; cases p2) (auto intro: gderiv.gdeduct_antisym)
 
@@ -160,7 +161,7 @@ lemma antisym_fn_cover:
   "antisym_fn (\<Gamma>, p) (\<Delta>, q) = Some ((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q)"
   by (simp add: antisym_fn_def)
 
-lemma g_refl_sound: "\<forall>q\<in>set (g_refl \<Sigma> W). gderiv (set W) q"
+lemma g_refl_sound: "\<forall>q\<in>set (g_refl \<Sigma> W). gderiv (set H) (set W) q"
 proof
   fix q assume "q \<in> set (g_refl \<Sigma> W)"
   then obtain c where c: "c \<in> set W"
@@ -168,7 +169,7 @@ proof
       Some (\<tau>,s,t) \<Rightarrow> if s = t \<and> typed_as \<Sigma> s \<tau> then [({}, c)] else []
     | None \<Rightarrow> [])"
     by (auto simp: g_refl_def set_concat)
-  show "gderiv (set W) q"
+  show "gderiv (set H) (set W) q"
   proof (cases "HOL_Lite_Waterfall.dest_eq c")
     case None
     then show ?thesis using q by simp
@@ -178,16 +179,16 @@ proof
     from q Some x have st: "s = t" "typed_as \<Sigma> s \<tau>" "q = ({}, c)"
       by (auto split: if_splits)
     from Some x have ce: "c = mk_eq \<tau> s t" by (simp add: HOL_Lite_Waterfall.dest_eq_sound)
-    have "({}, mk_eq \<tau> s s) \<in> Sequent_U (set W)" using c ce st(1) by (simp add: Sequent_U_def)
+    have "({}, mk_eq \<tau> s s) \<in> Sequent_HU (set H) (set W)" using c ce st(1) by (simp add: Sequent_HU_def)
     then show ?thesis using st ce gderiv.grefl[OF typed_as_sound[OF st(2)]] by simp
   qed
 qed
 
 lemma g_refl_cover:
-  assumes "has_type \<Sigma> [] t \<tau>" "({}, mk_eq \<tau> t t) \<in> Sequent_U (set W)"
+  assumes "has_type \<Sigma> [] t \<tau>" "({}, mk_eq \<tau> t t) \<in> Sequent_HU (set H) (set W)"
   shows "({}, mk_eq \<tau> t t) \<in> set (g_refl \<Sigma> W)"
 proof -
-  have c: "mk_eq \<tau> t t \<in> set W" using assms(2) by (simp add: Sequent_U_def)
+  have c: "mk_eq \<tau> t t \<in> set W" using assms(2) by (simp add: Sequent_HU_def)
   have "({}, mk_eq \<tau> t t) \<in> set (case HOL_Lite_Waterfall.dest_eq (mk_eq \<tau> t t) of
       Some (\<tau>,s,t) \<Rightarrow> if s = t \<and> typed_as \<Sigma> s \<tau> then [({}, mk_eq \<tau> t t)] else []
     | None \<Rightarrow> [])"
@@ -195,20 +196,20 @@ proof -
   then show ?thesis using c by (auto simp: g_refl_def set_concat intro: bexI[of _ "mk_eq \<tau> t t"])
 qed
 
-lemma g_assm_sound: "\<forall>q\<in>set (g_assm \<Sigma> W). gderiv (set W) q"
-  by (auto simp: g_assm_def Sequent_U_def intro!: gderiv.gassm dest: typed_as_sound)
+lemma g_assm_sound: "\<forall>q\<in>set (g_assm \<Sigma> H W). gderiv (set H) (set W) q"
+  by (auto simp: g_assm_def Sequent_HU_def intro!: gderiv.gassm dest: typed_as_sound)
 
 lemma g_assm_cover:
-  assumes "has_type \<Sigma> [] p boolT" "({p}, p) \<in> Sequent_U (set W)"
-  shows "({p}, p) \<in> set (g_assm \<Sigma> W)"
-  using assms typed_as_complete[OF assms(1)] by (auto simp: g_assm_def Sequent_U_def)
+  assumes "has_type \<Sigma> [] p boolT" "({p}, p) \<in> Sequent_HU (set H) (set W)"
+  shows "({p}, p) \<in> set (g_assm \<Sigma> H W)"
+  using assms typed_as_complete[OF assms(1)] by (auto simp: g_assm_def Sequent_HU_def)
 
-lemma g_beta_sound: "\<forall>q\<in>set (g_beta \<Sigma> W). gderiv (set W) q"
+lemma g_beta_sound: "\<forall>q\<in>set (g_beta \<Sigma> W). gderiv (set H) (set W) q"
 proof
   fix q assume "q \<in> set (g_beta \<Sigma> W)"
   then obtain c where c: "c \<in> set W" and q: "q \<in> set (beta_one \<Sigma> c)"
     by (auto simp: g_beta_def set_concat)
-  show "gderiv (set W) q"
+  show "gderiv (set H) (set W) q"
   proof (cases "HOL_Lite_Waterfall.dest_eq c")
     case None
     then show ?thesis using q by (simp add: beta_one_def)
@@ -231,8 +232,8 @@ proof
           have wty: "has_type \<Sigma> [] (Abs \<sigma> b) (funT \<sigma> \<tau>)"
             using typed_as_sound[OF conds(2)] Abs conds(1) by simp
           have mem: "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b))
-                     \<in> Sequent_U (set W)"
-            using c ce App Fv Abs conds by (simp add: Sequent_U_def)
+                     \<in> Sequent_HU (set H) (set W)"
+            using c ce App Fv Abs conds by (simp add: Sequent_HU_def)
           show ?thesis
             using gderiv.gbeta[OF wty mem] conds(3,4) ce App Fv Abs conds(1) by simp
         qed (use q Some y App Fv in \<open>simp_all add: beta_one_def\<close>)
@@ -243,24 +244,24 @@ qed
 
 lemma g_beta_cover:
   assumes "has_type \<Sigma> [] (Abs \<sigma> b) (funT \<sigma> \<tau>)"
-    "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)) \<in> Sequent_U (set W)"
+    "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)) \<in> Sequent_HU (set H) (set W)"
   shows "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)) \<in> set (g_beta \<Sigma> W)"
 proof -
   let ?c = "mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)"
-  have c: "?c \<in> set W" using assms(2) by (simp add: Sequent_U_def)
+  have c: "?c \<in> set W" using assms(2) by (simp add: Sequent_HU_def)
   have "({}, ?c) \<in> set (beta_one \<Sigma> ?c)"
     using typed_as_complete[OF assms(1)] by (simp add: beta_one_def)
   then show ?thesis using c by (auto simp: g_beta_def set_concat intro: bexI[of _ ?c])
 qed
 
 lemma g_axiom_sound:
-  "\<forall>q\<in>set (g_axiom axs ns r W). gderiv (set W) q"
-  by (auto simp: g_axiom_def axs_spec Sequent_U_def intro: gderiv.gaxiom)
+  "\<forall>q\<in>set (g_axiom axs ns r W). gderiv (set H) (set W) q"
+  by (auto simp: g_axiom_def axs_spec Sequent_HU_def intro: gderiv.gaxiom)
 
 lemma g_axiom_cover:
-  assumes "p \<in> A" "({}, p) \<in> Sequent_U (set W)" "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  assumes "p \<in> A" "({}, p) \<in> Sequent_HU (set H) (set W)" "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
   shows "({}, p) \<in> set (g_axiom axs ns r W)"
-  using assms by (auto simp: g_axiom_def axs_spec Sequent_U_def)
+  using assms by (auto simp: g_axiom_def axs_spec Sequent_HU_def)
 
 end
 
@@ -310,16 +311,16 @@ definition inst_tys :: "tm list \<Rightarrow> ty list" where
   "inst_tys W = remdups (concat (map (\<lambda>t. concat (map subtys (ann_tys t))) W))"
 
 definition g_inst_vars :: "tm list \<Rightarrow> (tm set \<times> tm) \<Rightarrow> name list" where
-  "g_inst_vars W p = remdups (tm_tyvar_list (snd p) @
-    concat (map tm_tyvar_list (filter (\<lambda>t. t \<in> fst p) W)))"
+  "g_inst_vars H p = remdups (tm_tyvar_list (snd p) @
+    concat (map tm_tyvar_list (filter (\<lambda>t. t \<in> fst p) H)))"
 
-definition g_inst :: "tm list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
-  "g_inst W S = concat (map (\<lambda>p1.
+definition g_inst :: "tm list \<Rightarrow> tm list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_inst H W S = concat (map (\<lambda>p1.
     concat (map (\<lambda>e.
       let \<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT);
           q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))
-      in if in_reg W q then [q] else [])
-      (inst_envs (g_inst_vars W p1) (inst_tys W)))) S)"
+      in if in_reg H W q then [q] else [])
+      (inst_envs (g_inst_vars H p1) (inst_tys (H @ W))))) S)"
 
 lemma subtys_self: "\<tau> \<in> set (subtys \<tau>)"
   by (cases \<tau>) simp_all
@@ -345,7 +346,7 @@ lemma inst_tys_mem:
 context hol_lite_axs
 begin
 
-lemma gderiv_region: "gderiv U p \<Longrightarrow> p \<in> Sequent_U U"
+lemma gderiv_region: "gderiv H U p \<Longrightarrow> p \<in> Sequent_HU H U"
   by (induction rule: gderiv.induct) auto
 
 lemma dest_abs_eq_sound:
@@ -358,14 +359,14 @@ lemma dest_abs_eq_mk: "dest_abs_eq (mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> a
   by (simp add: dest_abs_eq_def)
 
 lemma g_abs_sound:
-  assumes S: "\<forall>p\<in>set S. gderiv (set W) p"
-  shows "\<forall>q\<in>set (g_abs \<Sigma> ns W S). gderiv (set W) q"
+  assumes S: "\<forall>p\<in>set S. gderiv (set H) (set W) p"
+  shows "\<forall>q\<in>set (g_abs \<Sigma> ns W S). gderiv (set H) (set W) q"
 proof
   fix q assume "q \<in> set (g_abs \<Sigma> ns W S)"
   then obtain p1 c where p1: "p1 \<in> set S" and c: "c \<in> set W" and q: "q \<in> set (abs_one ns \<Sigma> p1 c)"
     by (auto simp: g_abs_def set_concat)
   obtain G e where p1e: "p1 = (G, e)" by (cases p1) auto
-  show "gderiv (set W) q"
+  show "gderiv (set H) (set W) q"
   proof (cases "HOL_Lite_Waterfall.dest_eq e")
     case None
     then show ?thesis using q p1e by (simp add: abs_one_def)
@@ -387,10 +388,10 @@ proof
         by blast
       have ce: "c = mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t))"
         using dest_abs_eq_sound[OF \<open>dest_abs_eq c = Some z\<close>[unfolded z]] conds by simp
-      have prem: "gderiv (set W) (G, mk_eq \<tau> s t)" using S p1 p1e e by auto
+      have prem: "gderiv (set H) (set W) (G, mk_eq \<tau> s t)" using S p1 p1e e by auto
       have reg: "(G, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
-                 \<in> Sequent_U (set W)"
-        using gderiv_region[OF prem] c ce by (auto simp: Sequent_U_def)
+                 \<in> Sequent_HU (set H) (set W)"
+        using gderiv_region[OF prem] c ce by (auto simp: Sequent_HU_def)
       show ?thesis using gderiv.gabs[OF prem conds(2) conds(3) reg] qq ce by simp
     qed
   qed
@@ -409,18 +410,19 @@ proof -
 qed
 
 lemma g_abs_cover:
-  assumes p: "(\<Gamma>, mk_eq \<tau> s t) \<in> set S" and Ssub: "set S \<subseteq> Sequent_U (set W)"
-    and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and wf: "wf_ty \<Sigma> \<sigma>"
+  assumes p: "(\<Gamma>, mk_eq \<tau> s t) \<in> set S" and Ssub: "set S \<subseteq> Sequent_HU (set H) (set W)"
+    and Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+    and wf: "wf_ty \<Sigma> \<sigma>"
     and fresh: "\<forall>p\<in>\<Gamma>. (x, \<sigma>) \<notin> fvs p"
     and concl: "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
-                \<in> Sequent_U (set W)"
+                \<in> Sequent_HU (set H) (set W)"
   shows "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
          \<in> set (g_abs \<Sigma> ns W S)"
 proof -
   let ?c = "mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t))"
-  have cW: "?c \<in> set W" using concl by (simp add: Sequent_U_def)
-  have eW: "mk_eq \<tau> s t \<in> set W" using p Ssub by (auto simp: Sequent_U_def)
-  have GW: "\<forall>g\<in>\<Gamma>. g \<in> set W" using p Ssub by (auto simp: Sequent_U_def)
+  have cW: "?c \<in> set W" using concl by (simp add: Sequent_HU_def)
+  have eW: "mk_eq \<tau> s t \<in> set W" using p Ssub by (auto simp: Sequent_HU_def)
+  have GW: "\<forall>g\<in>\<Gamma>. g \<in> set H" using p Ssub by (auto simp: Sequent_HU_def)
   have names: "\<exists>x'\<in>set (HOL_Lite_Waterfall.fresh_name ns # ns).
       (\<forall>p\<in>\<Gamma>. (x', \<sigma>) \<notin> fvs p) \<and> abs_fv 0 x \<sigma> s = abs_fv 0 x' \<sigma> s \<and>
       abs_fv 0 x \<sigma> t = abs_fv 0 x' \<sigma> t"
@@ -436,7 +438,7 @@ proof -
     have xs': "(?x', \<sigma>) \<notin> fvs s" and xt': "(?x', \<sigma>) \<notin> fvs t"
       using fv_name_in_universe[OF Wt eW, of ?x' \<sigma>] fr by auto
     have xg: "\<forall>p\<in>\<Gamma>. (?x', \<sigma>) \<notin> fvs p"
-      using fv_name_in_universe[OF Wt] GW fr by blast
+      using fv_name_in_universe[OF Ht] GW fr by blast
     show ?thesis
       using xg abs_fv_id[OF xs] abs_fv_id[OF xt] abs_fv_id[OF xs'] abs_fv_id[OF xt']
       by (intro bexI[of _ ?x']) auto
@@ -471,28 +473,30 @@ proof
 qed
 
 lemma set_g_inst_vars:
-  "fst p \<subseteq> set W \<Longrightarrow> set (g_inst_vars W p) = inst_vars p"
+  "fst p \<subseteq> set H \<Longrightarrow> set (g_inst_vars H p) = inst_vars p"
   by (auto simp: g_inst_vars_def inst_vars_def subset_iff set_concat)
 
 lemma map_of_map_pair: "a \<in> set vs \<Longrightarrow> map_of (map (\<lambda>x. (x, f x)) vs) a = Some (f a)"
   by (induction vs) auto
 
 lemma g_inst_sound:
-  assumes S: "\<forall>p\<in>set S. gderiv (set W) p" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
-  shows "\<forall>q\<in>set (g_inst W S). gderiv (set W) q"
+  assumes S: "\<forall>p\<in>set S. gderiv (set H) (set W) p"
+    and Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>q\<in>set (g_inst H W S). gderiv (set H) (set W) q"
 proof
-  fix q assume "q \<in> set (g_inst W S)"
+  fix q assume "q \<in> set (g_inst H W S)"
   then obtain p1 e where p1: "p1 \<in> set S"
-    and e: "e \<in> set (inst_envs (g_inst_vars W p1) (inst_tys W))"
+    and e: "e \<in> set (inst_envs (g_inst_vars H p1) (inst_tys (H @ W)))"
     and q: "q \<in> set (let \<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT);
           q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))
-        in if in_reg W q then [q] else [])"
+        in if in_reg H W q then [q] else [])"
     by (auto simp: g_inst_def set_concat_map)
   define \<theta> where "\<theta> = (\<lambda>a. case map_of e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT)"
   have qe: "q = (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))"
-    and reg: "in_reg W (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))"
+    and reg: "in_reg H W (tinst \<theta> ` fst p1, tinst \<theta> (snd p1))"
     using q by (auto simp: \<theta>_def Let_def split: if_splits)
-  have ran: "set (map snd e) \<subseteq> set (inst_tys W)" using e by (simp add: set_inst_envs)
+  have HWt: "set (H @ W) \<subseteq> Tm_wt (set ns) \<Sigma> r" using Ht Wt by simp
+  have ran: "set (map snd e) \<subseteq> set (inst_tys (H @ W))" using e by (simp add: set_inst_envs)
   have wf\<theta>: "\<And>a. wf_ty \<Sigma> (\<theta> a)"
   proof -
     fix a
@@ -503,32 +507,32 @@ proof
     next
       case (Some t)
       from map_of_range[OF Some] have "t \<in> set (map snd e)" .
-      then have "t \<in> set (inst_tys W)" by (rule rev_subsetD[OF _ ran])
-      then show ?thesis using inst_tys_wf[OF Wt] Some by (simp add: \<theta>_def)
+      then have "t \<in> set (inst_tys (H @ W))" by (rule rev_subsetD[OF _ ran])
+      then show ?thesis using inst_tys_wf[OF HWt] Some by (simp add: \<theta>_def)
     qed
   qed
   obtain G c where p1e: "p1 = (G, c)" by (cases p1) auto
-  from S p1 p1e have prem: "gderiv (set W) (G, c)" by auto
-  from reg p1e have "(tinst \<theta> ` G, tinst \<theta> c) \<in> Sequent_U (set W)" by simp
-  from gderiv.ginst_type[OF prem wf\<theta> this] show "gderiv (set W) q" using qe p1e by simp
+  from S p1 p1e have prem: "gderiv (set H) (set W) (G, c)" by auto
+  from reg p1e have "(tinst \<theta> ` G, tinst \<theta> c) \<in> Sequent_HU (set H) (set W)" by simp
+  from gderiv.ginst_type[OF prem wf\<theta> this] show "gderiv (set H) (set W) q" using qe p1e by simp
 qed
 
 lemma g_inst_cover:
-  assumes p: "(\<Gamma>, c) \<in> set S" and Ssub: "set S \<subseteq> Sequent_U (set W)"
-    and concl: "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> Sequent_U (set W)"
-  shows "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst W S)"
+  assumes p: "(\<Gamma>, c) \<in> set S" and Ssub: "set S \<subseteq> Sequent_HU (set H) (set W)"
+    and concl: "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> Sequent_HU (set H) (set W)"
+  shows "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst H W S)"
 proof -
-  have GW: "\<Gamma> \<subseteq> set W" using p Ssub by (auto simp: Sequent_U_def)
-  let ?vars = "g_inst_vars W (\<Gamma>, c)"
+  have GH: "\<Gamma> \<subseteq> set H" using p Ssub by (auto simp: Sequent_HU_def)
+  let ?vars = "g_inst_vars H (\<Gamma>, c)"
   have V: "set ?vars = tm_tyvars c \<union> (\<Union>t\<in>\<Gamma>. tm_tyvars t)"
-    using set_g_inst_vars[of "(\<Gamma>, c)" W] GW by (simp add: inst_vars_def)
-  have cW': "tinst \<theta> c \<in> set W" using concl by (simp add: Sequent_U_def)
-  have GW': "\<And>g. g \<in> \<Gamma> \<Longrightarrow> tinst \<theta> g \<in> set W" using concl by (auto simp: Sequent_U_def)
-  have tyl: "\<And>a. a \<in> set ?vars \<Longrightarrow> \<theta> a \<in> set (inst_tys W)"
+    using set_g_inst_vars[of "(\<Gamma>, c)" H] GH by (simp add: inst_vars_def)
+  have cW': "tinst \<theta> c \<in> set (H @ W)" using concl by (simp add: Sequent_HU_def)
+  have GW': "\<And>g. g \<in> \<Gamma> \<Longrightarrow> tinst \<theta> g \<in> set (H @ W)" using concl by (auto simp: Sequent_HU_def)
+  have tyl: "\<And>a. a \<in> set ?vars \<Longrightarrow> \<theta> a \<in> set (inst_tys (H @ W))"
   proof -
     fix a assume a: "a \<in> set ?vars"
     from a V have "a \<in> tm_tyvars c \<or> (\<exists>g\<in>\<Gamma>. a \<in> tm_tyvars g)" by auto
-    then show "\<theta> a \<in> set (inst_tys W)"
+    then show "\<theta> a \<in> set (inst_tys (H @ W))"
     proof
       assume "a \<in> tm_tyvars c"
       from ann_tys_tinst[OF this] obtain \<tau> where "\<tau> \<in> set (ann_tys (tinst \<theta> c))"
@@ -543,7 +547,7 @@ proof -
     qed
   qed
   let ?e = "map (\<lambda>a. (a, \<theta> a)) ?vars"
-  have emem: "?e \<in> set (inst_envs ?vars (inst_tys W))"
+  have emem: "?e \<in> set (inst_envs ?vars (inst_tys (H @ W)))"
     using tyl by (auto simp: set_inst_envs comp_def)
   define \<theta>' where "\<theta>' = (\<lambda>a. case map_of ?e a of Some t \<Rightarrow> t | None \<Rightarrow> boolT)"
   have agree: "\<And>a. a \<in> set ?vars \<Longrightarrow> \<theta>' a = \<theta> a"
@@ -563,11 +567,11 @@ end
 subsection \<open>The driver\<close>
 
 definition g_step :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
-    (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
-  "g_step \<Sigma> axs ns r W S =
-     g_refl \<Sigma> W @ g_assm \<Sigma> W @ g_beta \<Sigma> W @ g_axiom axs ns r W @
-     gscan W trans_fn S @ gscan W mk_comb_fn S @ g_abs \<Sigma> ns W S @
-     gscan W eq_mp_fn S @ gscan W antisym_fn S @ g_inst W S"
+    tm list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_step \<Sigma> axs ns r H W S =
+     g_refl \<Sigma> W @ g_assm \<Sigma> H W @ g_beta \<Sigma> W @ g_axiom axs ns r W @
+     gscan H W trans_fn S @ gscan H W mk_comb_fn S @ g_abs \<Sigma> ns W S @
+     gscan H W eq_mp_fn S @ gscan H W antisym_fn S @ g_inst H W S"
 
 text \<open>
   A round keeps only the candidates that are new.  A sequent is compared by its conclusion first
@@ -591,12 +595,12 @@ fun add_new :: "(tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) lis
 lemma set_add_new: "set (add_new S acc xs) = set acc \<union> {x \<in> set xs. x \<notin> set S}"
   by (induction xs arbitrary: acc) auto
 
-fun g_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow> nat \<Rightarrow>
-    (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
-  "g_rounds \<Sigma> axs ns r W 0 S = S"
-| "g_rounds \<Sigma> axs ns r W (Suc k) S =
-    (let N = add_new S [] (g_step \<Sigma> axs ns r W S)
-     in if N = [] then S else g_rounds \<Sigma> axs ns r W k (S @ N))"
+fun g_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
+    tm list \<Rightarrow> nat \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_rounds \<Sigma> axs ns r H W 0 S = S"
+| "g_rounds \<Sigma> axs ns r H W (Suc k) S =
+    (let N = add_new S [] (g_step \<Sigma> axs ns r H W S)
+     in if N = [] then S else g_rounds \<Sigma> axs ns r H W k (S @ N))"
 
 text \<open>
   The universe actually used is the given list restricted to the terms that are well-typed and
@@ -607,13 +611,14 @@ text \<open>
 definition g_universe :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow> tm list" where
   "g_universe \<Sigma> ns r U = filter (tm_ok ns \<Sigma> r) (remdups U)"
 
-definition g_bound :: "tm list \<Rightarrow> nat" where
-  "g_bound W = 2 ^ length W * length W"
+definition g_bound :: "tm list \<Rightarrow> tm list \<Rightarrow> nat" where
+  "g_bound H W = 2 ^ length H * length W"
 
 definition gflood_decide :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
-    (tm set \<times> tm) \<Rightarrow> bool" where
-  "gflood_decide \<Sigma> axs ns r U p =
-    (let W = g_universe \<Sigma> ns r U in p \<in> set (g_rounds \<Sigma> axs ns r W (g_bound W) []))"
+    tm list \<Rightarrow> (tm set \<times> tm) \<Rightarrow> bool" where
+  "gflood_decide \<Sigma> axs ns r Hs U p =
+    (let H = g_universe \<Sigma> ns r Hs; W = g_universe \<Sigma> ns r U
+     in p \<in> set (g_rounds \<Sigma> axs ns r H W (g_bound H W) []))"
 
 context hol_lite_axs
 begin
@@ -625,61 +630,63 @@ lemma distinct_g_universe: "distinct (g_universe \<Sigma> ns r U)"
   by (simp add: g_universe_def)
 
 lemma g_step_sound:
-  assumes S: "\<forall>p\<in>set S. gderiv (set W) p" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
-  shows "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
+  assumes S: "\<forall>p\<in>set S. gderiv (set H) (set W) p"
+    and Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>q\<in>set (g_step \<Sigma> axs ns r H W S). gderiv (set H) (set W) q"
 proof -
-  have a5: "\<forall>q\<in>set (gscan W trans_fn S). gderiv (set W) q"
+  have a5: "\<forall>q\<in>set (gscan H W trans_fn S). gderiv (set H) (set W) q"
     by (rule gscan_sound[OF _ S]) (use trans_fn_sound in blast)
-  have a6: "\<forall>q\<in>set (gscan W mk_comb_fn S). gderiv (set W) q"
+  have a6: "\<forall>q\<in>set (gscan H W mk_comb_fn S). gderiv (set H) (set W) q"
     by (rule gscan_sound[OF _ S]) (use mk_comb_fn_sound in blast)
-  have a8: "\<forall>q\<in>set (gscan W eq_mp_fn S). gderiv (set W) q"
+  have a8: "\<forall>q\<in>set (gscan H W eq_mp_fn S). gderiv (set H) (set W) q"
     by (rule gscan_sound[OF _ S]) (use eq_mp_fn_sound in blast)
-  have a9: "\<forall>q\<in>set (gscan W antisym_fn S). gderiv (set W) q"
+  have a9: "\<forall>q\<in>set (gscan H W antisym_fn S). gderiv (set H) (set W) q"
     by (rule gscan_sound[OF _ S]) (use antisym_fn_sound in blast)
-  note a1 = g_refl_sound and a2 = g_assm_sound and a3 = g_beta_sound and a4 = g_axiom_sound
-    and a7 = g_abs_sound[OF S] and a10 = g_inst_sound[OF S Wt]
+  note a1 = g_refl_sound[where H = H and W = W] and a2 = g_assm_sound[where H = H and W = W]
+    and a3 = g_beta_sound[where H = H and W = W] and a4 = g_axiom_sound[where H = H and W = W]
+    and a7 = g_abs_sound[OF S] and a10 = g_inst_sound[OF S Ht Wt]
   show ?thesis
     unfolding g_step_def set_append
     using a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 by blast
 qed
 
 lemma g_rounds_sound:
-  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
-  shows "\<forall>p\<in>set S. gderiv (set W) p \<Longrightarrow>
-         \<forall>p\<in>set (g_rounds \<Sigma> axs ns r W k S). gderiv (set W) p"
+  assumes Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>p\<in>set S. gderiv (set H) (set W) p \<Longrightarrow>
+         \<forall>p\<in>set (g_rounds \<Sigma> axs ns r H W k S). gderiv (set H) (set W) p"
 proof (induction k arbitrary: S)
   case 0
   then show ?case by simp
 next
   case (Suc k)
-  let ?N = "add_new S [] (g_step \<Sigma> axs ns r W S)"
-  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
-    using g_step_sound[OF Suc.prems Wt] .
-  have "\<forall>p\<in>set (S @ ?N). gderiv (set W) p"
+  let ?N = "add_new S [] (g_step \<Sigma> axs ns r H W S)"
+  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r H W S). gderiv (set H) (set W) q"
+    using g_step_sound[OF Suc.prems Ht Wt] .
+  have "\<forall>p\<in>set (S @ ?N). gderiv (set H) (set W) p"
     using Suc.prems stepS by (auto simp: set_add_new)
   then show ?case
     using Suc.IH[of "S @ ?N"] Suc.prems by (auto simp: Let_def split: if_splits)
 qed
 
-lemma step_of_refl: "q \<in> set (g_refl \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_refl: "q \<in> set (g_refl \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_assm: "q \<in> set (g_assm \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_assm: "q \<in> set (g_assm \<Sigma> H W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_beta: "q \<in> set (g_beta \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_beta: "q \<in> set (g_beta \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_axiom: "q \<in> set (g_axiom axs ns r W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_axiom: "q \<in> set (g_axiom axs ns r W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_trans: "q \<in> set (gscan W trans_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_trans: "q \<in> set (gscan H W trans_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_mk_comb: "q \<in> set (gscan W mk_comb_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_mk_comb: "q \<in> set (gscan H W mk_comb_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_abs: "q \<in> set (g_abs \<Sigma> ns W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_abs: "q \<in> set (g_abs \<Sigma> ns W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_eq_mp: "q \<in> set (gscan W eq_mp_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_eq_mp: "q \<in> set (gscan H W eq_mp_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_antisym: "q \<in> set (gscan W antisym_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_antisym: "q \<in> set (gscan H W antisym_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
-lemma step_of_inst: "q \<in> set (g_inst W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+lemma step_of_inst: "q \<in> set (g_inst H W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r H W S)"
   by (simp add: g_step_def)
 
 text \<open>
@@ -688,115 +695,117 @@ text \<open>
 \<close>
 
 lemma closed_contains_gderiv:
-  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and F: "set F \<subseteq> Sequent_U (set W)"
-    and closed: "set (g_step \<Sigma> axs ns r W F) \<subseteq> set F"
-  shows "gderiv (set W) p \<Longrightarrow> p \<in> set F"
+  assumes Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+    and F: "set F \<subseteq> Sequent_HU (set H) (set W)"
+    and closed: "set (g_step \<Sigma> axs ns r H W F) \<subseteq> set F"
+  shows "gderiv (set H) (set W) p \<Longrightarrow> p \<in> set F"
 proof (induction rule: gderiv.induct)
   case (grefl t \<tau>)
   have "({}, mk_eq \<tau> t t) \<in> set (g_refl \<Sigma> W)" by (rule g_refl_cover[OF grefl.hyps(1) grefl.hyps(2)])
-  then have "({}, mk_eq \<tau> t t) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_refl)
+  then have "({}, mk_eq \<tau> t t) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_refl)
   with closed show ?case by blast
 next
   case (gtrans \<Gamma> \<tau> s t \<Delta> u)
-  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (gscan W trans_fn F)"
+  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (gscan H W trans_fn F)"
     by (rule gscan_cover[where f = trans_fn, OF gtrans.IH(1) gtrans.IH(2) trans_fn_cover gtrans.hyps(3)])
-  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_trans)
+  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_trans)
   with closed show ?case by blast
 next
   case (gmk_comb \<Gamma> \<sigma> \<tau> f g \<Delta> a b)
-  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (gscan W mk_comb_fn F)"
+  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (gscan H W mk_comb_fn F)"
     by (rule gscan_cover[where f = mk_comb_fn, OF gmk_comb.IH(1) gmk_comb.IH(2) mk_comb_fn_cover gmk_comb.hyps(3)])
-  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (g_step \<Sigma> axs ns r W F)"
+  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (g_step \<Sigma> axs ns r H W F)"
     by (rule step_of_mk_comb)
   with closed show ?case by blast
 next
   case (gabs \<Gamma> \<tau> s t \<sigma> x)
   have "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
         \<in> set (g_abs \<Sigma> ns W F)"
-    by (rule g_abs_cover[OF gabs.IH F Wt gabs.hyps(2) gabs.hyps(3) gabs.hyps(4)])
+    by (rule g_abs_cover[OF gabs.IH F Ht Wt gabs.hyps(2) gabs.hyps(3) gabs.hyps(4)])
   then have "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
-        \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_abs)
+        \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_abs)
   with closed show ?case by blast
 next
   case (gbeta \<sigma> b \<tau> x)
   have "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)) \<in> set (g_beta \<Sigma> W)"
     by (rule g_beta_cover[OF gbeta.hyps(1) gbeta.hyps(2)])
   then have "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b))
-      \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_beta)
+      \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_beta)
   with closed show ?case by blast
 next
   case (gassm p)
-  have "({p}, p) \<in> set (g_assm \<Sigma> W)" by (rule g_assm_cover[OF gassm.hyps(1) gassm.hyps(2)])
-  then have "({p}, p) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_assm)
+  have "({p}, p) \<in> set (g_assm \<Sigma> H W)" by (rule g_assm_cover[OF gassm.hyps(1) gassm.hyps(2)])
+  then have "({p}, p) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_assm)
   with closed show ?case by blast
 next
   case (geq_mp \<Gamma> p q \<Delta>)
-  have "(\<Gamma> \<union> \<Delta>, q) \<in> set (gscan W eq_mp_fn F)"
+  have "(\<Gamma> \<union> \<Delta>, q) \<in> set (gscan H W eq_mp_fn F)"
     by (rule gscan_cover[where f = eq_mp_fn, OF geq_mp.IH(1) geq_mp.IH(2) eq_mp_fn_cover geq_mp.hyps(3)])
-  then have "(\<Gamma> \<union> \<Delta>, q) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_eq_mp)
+  then have "(\<Gamma> \<union> \<Delta>, q) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_eq_mp)
   with closed show ?case by blast
 next
   case (gdeduct_antisym \<Gamma> p \<Delta> q)
-  have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (gscan W antisym_fn F)"
+  have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (gscan H W antisym_fn F)"
     by (rule gscan_cover[where f = antisym_fn, OF gdeduct_antisym.IH(1) gdeduct_antisym.IH(2) antisym_fn_cover
         gdeduct_antisym.hyps(3)])
-  then have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (g_step \<Sigma> axs ns r W F)"
+  then have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (g_step \<Sigma> axs ns r H W F)"
     by (rule step_of_antisym)
   with closed show ?case by blast
 next
   case (ginst_type \<Gamma> c \<theta>)
-  have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst W F)"
+  have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst H W F)"
     by (rule g_inst_cover[OF ginst_type.IH F ginst_type.hyps(3)])
-  then have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_inst)
+  then have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_inst)
   with closed show ?case by blast
 next
   case (gaxiom p)
   have "({}, p) \<in> set (g_axiom axs ns r W)"
     by (rule g_axiom_cover[OF gaxiom.hyps(1) gaxiom.hyps(2) Wt])
-  then have "({}, p) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_axiom)
+  then have "({}, p) \<in> set (g_step \<Sigma> axs ns r H W F)" by (rule step_of_axiom)
   with closed show ?case by blast
 qed
 
-lemma finite_Sequent_U: "finite U \<Longrightarrow> finite (Sequent_U U)"
-  by (simp add: Sequent_U_def)
+lemma finite_Sequent_HU: "finite H \<Longrightarrow> finite U \<Longrightarrow> finite (Sequent_HU H U)"
+  by (simp add: Sequent_HU_def)
 
-lemma card_Sequent_U:
-  "finite U \<Longrightarrow> card (Sequent_U U) = 2 ^ card U * card U"
-  by (simp add: Sequent_U_def card_Pow card_cartesian_product)
+lemma card_Sequent_HU:
+  "finite H \<Longrightarrow> finite U \<Longrightarrow> card (Sequent_HU H U) = 2 ^ card H * card U"
+  by (simp add: Sequent_HU_def card_Pow card_cartesian_product)
 
 text \<open>
-  Within @{text "card (Sequent_U U)"} rounds the saturation reaches a fixed point: each round
+  Within @{text "card (Sequent_HU H U)"} rounds the saturation reaches a fixed point: each round
   either adds a sequent of the finite region or stops.
 \<close>
 
 lemma g_rounds_closed:
-  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and fin: "finite (set W)"
-  shows "\<forall>p\<in>set S. gderiv (set W) p \<Longrightarrow>
-         card (Sequent_U (set W)) \<le> card (set S) + k \<Longrightarrow>
-         set (g_step \<Sigma> axs ns r W (g_rounds \<Sigma> axs ns r W k S)) \<subseteq> set (g_rounds \<Sigma> axs ns r W k S)"
+  assumes Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+    and finH: "finite (set H)" and finW: "finite (set W)"
+  shows "\<forall>p\<in>set S. gderiv (set H) (set W) p \<Longrightarrow>
+         card (Sequent_HU (set H) (set W)) \<le> card (set S) + k \<Longrightarrow>
+         set (g_step \<Sigma> axs ns r H W (g_rounds \<Sigma> axs ns r H W k S)) \<subseteq> set (g_rounds \<Sigma> axs ns r H W k S)"
 proof (induction k arbitrary: S)
   case 0
-  have finR: "finite (Sequent_U (set W))" using fin by (rule finite_Sequent_U)
-  have sub: "set S \<subseteq> Sequent_U (set W)" using 0(1) gderiv_region by blast
-  have eq: "set S = Sequent_U (set W)"
+  have finR: "finite (Sequent_HU (set H) (set W))" using finH finW by (rule finite_Sequent_HU)
+  have sub: "set S \<subseteq> Sequent_HU (set H) (set W)" using 0(1) gderiv_region by blast
+  have eq: "set S = Sequent_HU (set H) (set W)"
     using card_seteq[OF finR sub] 0(2) by simp
-  have "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
-    using g_step_sound[OF 0(1) Wt] .
-  then have "set (g_step \<Sigma> axs ns r W S) \<subseteq> Sequent_U (set W)"
+  have "\<forall>q\<in>set (g_step \<Sigma> axs ns r H W S). gderiv (set H) (set W) q"
+    using g_step_sound[OF 0(1) Ht Wt] .
+  then have "set (g_step \<Sigma> axs ns r H W S) \<subseteq> Sequent_HU (set H) (set W)"
     using gderiv_region by blast
   then show ?case using eq by simp
 next
   case (Suc k)
-  let ?N = "add_new S [] (g_step \<Sigma> axs ns r W S)"
-  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
-    using g_step_sound[OF Suc.prems(1) Wt] .
-  have setN: "set ?N = {x \<in> set (g_step \<Sigma> axs ns r W S). x \<notin> set S}"
+  let ?N = "add_new S [] (g_step \<Sigma> axs ns r H W S)"
+  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r H W S). gderiv (set H) (set W) q"
+    using g_step_sound[OF Suc.prems(1) Ht Wt] .
+  have setN: "set ?N = {x \<in> set (g_step \<Sigma> axs ns r H W S). x \<notin> set S}"
     by (simp add: set_add_new)
-  have gT: "\<forall>p\<in>set (S @ ?N). gderiv (set W) p" using Suc.prems(1) stepS setN by auto
+  have gT: "\<forall>p\<in>set (S @ ?N). gderiv (set H) (set W) p" using Suc.prems(1) stepS setN by auto
   show ?case
   proof (cases "?N = []")
     case True
-    then have "set (g_step \<Sigma> axs ns r W S) \<subseteq> set S" using setN by auto
+    then have "set (g_step \<Sigma> axs ns r H W S) \<subseteq> set S" using setN by auto
     then show ?thesis using True by (simp add: Let_def)
   next
     case False
@@ -805,57 +814,64 @@ next
     have xnS: "x \<notin> set S" using x setN by auto
     have psub: "set S \<subset> set (S @ ?N)" using x xnS by auto
     have "card (set S) < card (set (S @ ?N))" by (rule psubset_card_mono[OF finT psub])
-    then have "card (Sequent_U (set W)) \<le> card (set (S @ ?N)) + k" using Suc.prems(2) by simp
+    then have "card (Sequent_HU (set H) (set W)) \<le> card (set (S @ ?N)) + k" using Suc.prems(2) by simp
     from Suc.IH[OF gT this] False show ?thesis by (simp add: Let_def)
   qed
 qed
 
 theorem gflood_decide_iff_gderiv:
-  "gflood_decide \<Sigma> axs ns r U p \<longleftrightarrow> gderiv (set U \<inter> Tm_wt (set ns) \<Sigma> r) p"
+  "gflood_decide \<Sigma> axs ns r Hs U p \<longleftrightarrow>
+   gderiv (set Hs \<inter> Tm_wt (set ns) \<Sigma> r) (set U \<inter> Tm_wt (set ns) \<Sigma> r) p"
 proof -
+  define H where "H = g_universe \<Sigma> ns r Hs"
   define W where "W = g_universe \<Sigma> ns r U"
+  have setH: "set H = set Hs \<inter> Tm_wt (set ns) \<Sigma> r" unfolding H_def by (rule set_g_universe)
   have setW: "set W = set U \<inter> Tm_wt (set ns) \<Sigma> r" unfolding W_def by (rule set_g_universe)
+  have Ht: "set H \<subseteq> Tm_wt (set ns) \<Sigma> r" using setH by simp
   have Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" using setW by simp
-  have fin: "finite (set W)" by simp
-  have dist: "distinct W" unfolding W_def by (rule distinct_g_universe)
-  have bound: "g_bound W = card (Sequent_U (set W))"
-    using card_Sequent_U[OF fin] distinct_card[OF dist] by (simp add: g_bound_def)
-  have rounds: "\<forall>x\<in>set (g_rounds \<Sigma> axs ns r W (g_bound W) []). gderiv (set W) x"
-    by (rule g_rounds_sound[OF Wt]) simp
-  show ?thesis unfolding gflood_decide_def Let_def W_def[symmetric] setW[symmetric]
+  have finH: "finite (set H)" and finW: "finite (set W)" by simp_all
+  have distH: "distinct H" unfolding H_def by (rule distinct_g_universe)
+  have distW: "distinct W" unfolding W_def by (rule distinct_g_universe)
+  have bound: "g_bound H W = card (Sequent_HU (set H) (set W))"
+    using card_Sequent_HU[OF finH finW] distinct_card[OF distH] distinct_card[OF distW]
+    by (simp add: g_bound_def)
+  have rounds: "\<forall>x\<in>set (g_rounds \<Sigma> axs ns r H W (g_bound H W) []). gderiv (set H) (set W) x"
+    by (rule g_rounds_sound[OF Ht Wt]) simp
+  show ?thesis
+    unfolding gflood_decide_def Let_def H_def[symmetric] W_def[symmetric] setH[symmetric] setW[symmetric]
   proof
-    assume "p \<in> set (g_rounds \<Sigma> axs ns r W (g_bound W) [])"
-    with rounds show "gderiv (set W) p" by blast
+    assume "p \<in> set (g_rounds \<Sigma> axs ns r H W (g_bound H W) [])"
+    with rounds show "gderiv (set H) (set W) p" by blast
   next
-    assume p: "gderiv (set W) p"
-    let ?F = "g_rounds \<Sigma> axs ns r W (g_bound W) []"
-    have closed: "set (g_step \<Sigma> axs ns r W ?F) \<subseteq> set ?F"
-      by (rule g_rounds_closed[OF Wt fin]) (simp_all add: bound)
-    have Fsub: "set ?F \<subseteq> Sequent_U (set W)" using rounds gderiv_region by blast
-    from closed_contains_gderiv[OF Wt Fsub closed p] show "p \<in> set ?F" .
+    assume p: "gderiv (set H) (set W) p"
+    let ?F = "g_rounds \<Sigma> axs ns r H W (g_bound H W) []"
+    have closed: "set (g_step \<Sigma> axs ns r H W ?F) \<subseteq> set ?F"
+      by (rule g_rounds_closed[OF Ht Wt finH finW]) (simp_all add: bound)
+    have Fsub: "set ?F \<subseteq> Sequent_HU (set H) (set W)" using rounds gderiv_region by blast
+    from closed_contains_gderiv[OF Ht Wt Fsub closed p] show "p \<in> set ?F" .
   qed
 qed
 
 corollary gflood_decide_sound:
-  "gflood_decide \<Sigma> axs ns r U (\<Gamma>, c) \<Longrightarrow> derivable \<Gamma> c"
+  "gflood_decide \<Sigma> axs ns r Hs U (\<Gamma>, c) \<Longrightarrow> derivable \<Gamma> c"
   using gflood_decide_iff_gderiv gderiv_sound by blast
 
 corollary gflood_decide_complete_in_limit:
-  "derivable \<Gamma> c \<longleftrightarrow> (\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c))"
+  "derivable \<Gamma> c \<longleftrightarrow> (\<exists>ns r Hs U. gflood_decide \<Sigma> axs ns r Hs U (\<Gamma>, c))"
 proof
   assume "derivable \<Gamma> c"
   then obtain N r where fN: "finite N" and b: "bderiv N r (\<Gamma>, c)"
     using derivable_iff_bderiv by blast
   obtain ns where ns: "set ns = N" using finite_list[OF fN] by blast
-  have g: "gderiv (Tm_wt (set ns) \<Sigma> r) (\<Gamma>, c)"
+  have g: "gderiv (Tm_wt (set ns) \<Sigma> r) (Tm_wt (set ns) \<Sigma> r) (\<Gamma>, c)"
     using b ns by (simp add: bderiv_iff_gderiv)
   have "set (enum_tm ns \<Sigma> r) \<inter> Tm_wt (set ns) \<Sigma> r = Tm_wt (set ns) \<Sigma> r"
     by (simp add: set_enum_tm)
-  then have "gflood_decide \<Sigma> axs ns r (enum_tm ns \<Sigma> r) (\<Gamma>, c)"
+  then have "gflood_decide \<Sigma> axs ns r (enum_tm ns \<Sigma> r) (enum_tm ns \<Sigma> r) (\<Gamma>, c)"
     using g gflood_decide_iff_gderiv by simp
-  then show "\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c)" by blast
+  then show "\<exists>ns r Hs U. gflood_decide \<Sigma> axs ns r Hs U (\<Gamma>, c)" by blast
 next
-  assume "\<exists>ns r U. gflood_decide \<Sigma> axs ns r U (\<Gamma>, c)"
+  assume "\<exists>ns r Hs U. gflood_decide \<Sigma> axs ns r Hs U (\<Gamma>, c)"
   then show "derivable \<Gamma> c" using gflood_decide_sound by blast
 qed
 
