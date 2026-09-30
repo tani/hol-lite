@@ -662,41 +662,13 @@ fun flood_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow
     (let T = remdups (S @ runtime_step \<Sigma> axs ns r S)
      in if set T = set S then S else flood_rounds \<Sigma> axs ns r k T)"
 
-text \<open>@{text flood_search} is @{text flood_rounds} with an early exit: it stops as soon as the
-  goal @{text p} is among the sequents generated so far.  Since every round only adds sequents,
-  the answer is the same as membership in the final saturated set (@{text flood_search_iff}).\<close>
-
-fun flood_search :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow>
-    (tm set \<times> tm) \<Rightarrow> nat \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> bool" where
-  "flood_search \<Sigma> axs ns r p 0 S = (p \<in> set S)"
-| "flood_search \<Sigma> axs ns r p (Suc k) S =
-    (p \<in> set S \<or>
-     (let T = remdups (S @ runtime_step \<Sigma> axs ns r S)
-      in set T \<noteq> set S \<and> flood_search \<Sigma> axs ns r p k T))"
-
-lemma set_flood_rounds_superset: "set S \<subseteq> set (flood_rounds \<Sigma> axs ns r k S)"
-proof (induction k arbitrary: S)
-  case 0 then show ?case by simp
-next
-  case (Suc k)
-  let ?T = "remdups (S @ runtime_step \<Sigma> axs ns r S)"
-  have ST: "set S \<subseteq> set ?T" by auto
-  show ?case
-  proof (cases "set ?T = set S")
-    case True then show ?thesis by (simp add: Let_def)
-  next
-    case False
-    then show ?thesis using ST Suc.IH[of ?T] by (auto simp: Let_def)
-  qed
-qed
-
 definition flood_bound :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> nat" where
   "flood_bound \<Sigma> ns r = 2 ^ length (enum_tm ns \<Sigma> r) * length (enum_tm ns \<Sigma> r)"
 
 definition flood_decide :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow>
     (tm set \<times> tm) \<Rightarrow> bool" where
   "flood_decide \<Sigma> axs ns r p =
-    flood_search \<Sigma> axs ns r p (flood_bound \<Sigma> ns r) []"
+    (p \<in> set (flood_rounds \<Sigma> axs ns r (flood_bound \<Sigma> ns r) []))"
 
 definition flood_processor :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> processor" where
   "flood_processor \<Sigma> axs ns r g =
@@ -740,40 +712,6 @@ next
   qed
 qed
 
-lemma flood_search_iff:
-  assumes sub: "set S \<subseteq> Sequent_r (set ns) \<Sigma> r"
-  shows "flood_search \<Sigma> axs ns r p k S \<longleftrightarrow> p \<in> set (flood_rounds \<Sigma> axs ns r k S)"
-  using sub
-proof (induction k arbitrary: S)
-  case 0
-  then show ?case by simp
-next
-  case (Suc k)
-  let ?T = "remdups (S @ runtime_step \<Sigma> axs ns r S)"
-  have Tset: "set ?T = grow_r (set ns) r (set S)"
-    using set_runtime_step[OF Suc.prems] by (simp add: grow_r_def)
-  have Tsub: "set ?T \<subseteq> Sequent_r (set ns) \<Sigma> r"
-    using Tset grow_r_subset Suc.prems by blast
-  show ?case
-  proof (cases "p \<in> set S")
-    case True
-    have "p \<in> set (flood_rounds \<Sigma> axs ns r (Suc k) S)"
-      by (rule rev_subsetD[OF True set_flood_rounds_superset])
-    with True show ?thesis by simp
-  next
-    case False
-    note pS = False
-    show ?thesis
-    proof (cases "set ?T = set S")
-      case True
-      then show ?thesis using pS by (simp add: Let_def)
-    next
-      case False
-      then show ?thesis using Suc.IH[OF Tsub] pS by (simp add: Let_def)
-    qed
-  qed
-qed
-
 lemma flood_bound_card:
   "flood_bound \<Sigma> ns r = card (Sequent_r (set ns) \<Sigma> r)"
 proof -
@@ -785,7 +723,7 @@ qed
 theorem flood_decide_iff_bderiv:
   "flood_decide \<Sigma> axs ns r p \<longleftrightarrow> bderiv (set ns) r p"
   using set_flood_rounds[of "[]" ns r "flood_bound \<Sigma> ns r"]
-    bounded_iteration_iff_bderiv[of "set ns" p r] flood_search_iff[of "[]" ns r p "flood_bound \<Sigma> ns r"]
+    bounded_iteration_iff_bderiv[of "set ns" p r]
   by (simp add: flood_decide_def flood_bound_card iterate_r_def)
 
 corollary flood_decide_sound:
