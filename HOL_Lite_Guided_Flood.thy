@@ -564,17 +564,39 @@ subsection \<open>The driver\<close>
 
 definition g_step :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
     (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
-  "g_step \<Sigma> axs ns r W S = remdups (
+  "g_step \<Sigma> axs ns r W S =
      g_refl \<Sigma> W @ g_assm \<Sigma> W @ g_beta \<Sigma> W @ g_axiom axs ns r W @
      gscan W trans_fn S @ gscan W mk_comb_fn S @ g_abs \<Sigma> ns W S @
-     gscan W eq_mp_fn S @ gscan W antisym_fn S @ g_inst W S)"
+     gscan W eq_mp_fn S @ gscan W antisym_fn S @ g_inst W S"
+
+text \<open>
+  A round keeps only the candidates that are new.  A sequent is compared by its conclusion first
+  and by its hypotheses only when the conclusions agree: the candidates of one round are almost
+  all repeats of sequents already found, and comparing hypothesis sets first (set equality) is
+  the expensive way round.
+\<close>
+
+definition mem_seq :: "(tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> bool" where
+  "mem_seq x ys = list_ex (\<lambda>y. snd y = snd x \<and> fst y = fst x) ys"
+
+lemma mem_seq_iff [simp]: "mem_seq x ys \<longleftrightarrow> x \<in> set ys"
+  by (cases x) (auto simp: mem_seq_def list_ex_iff prod_eq_iff)
+
+fun add_new :: "(tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list \<Rightarrow>
+    (tm set \<times> tm) list" where
+  "add_new S acc [] = acc"
+| "add_new S acc (x # xs) =
+    (if mem_seq x S \<or> mem_seq x acc then add_new S acc xs else add_new S (x # acc) xs)"
+
+lemma set_add_new: "set (add_new S acc xs) = set acc \<union> {x \<in> set xs. x \<notin> set S}"
+  by (induction xs arbitrary: acc) auto
 
 fun g_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow> nat \<Rightarrow>
     (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
   "g_rounds \<Sigma> axs ns r W 0 S = S"
 | "g_rounds \<Sigma> axs ns r W (Suc k) S =
-    (let T = remdups (S @ g_step \<Sigma> axs ns r W S)
-     in if set T = set S then S else g_rounds \<Sigma> axs ns r W k T)"
+    (let N = add_new S [] (g_step \<Sigma> axs ns r W S)
+     in if N = [] then S else g_rounds \<Sigma> axs ns r W k (S @ N))"
 
 text \<open>
   The universe actually used is the given list restricted to the terms that are well-typed and
@@ -617,7 +639,7 @@ proof -
   note a1 = g_refl_sound and a2 = g_assm_sound and a3 = g_beta_sound and a4 = g_axiom_sound
     and a7 = g_abs_sound[OF S] and a10 = g_inst_sound[OF S Wt]
   show ?thesis
-    unfolding g_step_def set_remdups set_append
+    unfolding g_step_def set_append
     using a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 by blast
 qed
 
@@ -630,11 +652,13 @@ proof (induction k arbitrary: S)
   then show ?case by simp
 next
   case (Suc k)
-  let ?T = "remdups (S @ g_step \<Sigma> axs ns r W S)"
-  have "\<forall>p\<in>set ?T. gderiv (set W) p"
-    using Suc.prems g_step_sound[OF Suc.prems Wt] by auto
+  let ?N = "add_new S [] (g_step \<Sigma> axs ns r W S)"
+  have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
+    using g_step_sound[OF Suc.prems Wt] .
+  have "\<forall>p\<in>set (S @ ?N). gderiv (set W) p"
+    using Suc.prems stepS by (auto simp: set_add_new)
   then show ?case
-    using Suc.IH[of ?T] Suc.prems by (auto simp: Let_def split: if_splits)
+    using Suc.IH[of "S @ ?N"] Suc.prems by (auto simp: Let_def split: if_splits)
 qed
 
 lemma step_of_refl: "q \<in> set (g_refl \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
@@ -763,22 +787,25 @@ proof (induction k arbitrary: S)
   then show ?case using eq by simp
 next
   case (Suc k)
-  let ?T = "remdups (S @ g_step \<Sigma> axs ns r W S)"
+  let ?N = "add_new S [] (g_step \<Sigma> axs ns r W S)"
   have stepS: "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
     using g_step_sound[OF Suc.prems(1) Wt] .
-  have gT: "\<forall>p\<in>set ?T. gderiv (set W) p" using Suc.prems(1) stepS by auto
+  have setN: "set ?N = {x \<in> set (g_step \<Sigma> axs ns r W S). x \<notin> set S}"
+    by (simp add: set_add_new)
+  have gT: "\<forall>p\<in>set (S @ ?N). gderiv (set W) p" using Suc.prems(1) stepS setN by auto
   show ?case
-  proof (cases "set ?T = set S")
+  proof (cases "?N = []")
     case True
-    then show ?thesis by (auto simp: Let_def)
+    then have "set (g_step \<Sigma> axs ns r W S) \<subseteq> set S" using setN by auto
+    then show ?thesis using True by (simp add: Let_def)
   next
     case False
-    have finR: "finite (Sequent_U (set W))" using fin by (rule finite_Sequent_U)
-    have subT: "set ?T \<subseteq> Sequent_U (set W)" using gT gderiv_region by blast
-    have finT: "finite (set ?T)" by simp
-    have psub: "set S \<subset> set ?T" using False by auto
-    have "card (set S) < card (set ?T)" by (rule psubset_card_mono[OF finT psub])
-    then have "card (Sequent_U (set W)) \<le> card (set ?T) + k" using Suc.prems(2) by simp
+    have finT: "finite (set (S @ ?N))" by simp
+    obtain x where x: "x \<in> set ?N" using False by (cases ?N) auto
+    have xnS: "x \<notin> set S" using x setN by auto
+    have psub: "set S \<subset> set (S @ ?N)" using x xnS by auto
+    have "card (set S) < card (set (S @ ?N))" by (rule psubset_card_mono[OF finT psub])
+    then have "card (Sequent_U (set W)) \<le> card (set (S @ ?N)) + k" using Suc.prems(2) by simp
     from Suc.IH[OF gT this] False show ?thesis by (simp add: Let_def)
   qed
 qed
