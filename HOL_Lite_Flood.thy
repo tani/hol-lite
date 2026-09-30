@@ -1,5 +1,5 @@
 theory HOL_Lite_Flood
-  imports HOL_Lite_Waterfall HOL_Lite_Saturation
+  imports HOL_Lite_Waterfall HOL_Lite_Saturation "HOL-Library.Code_Target_Nat"
 begin
 
 section \<open>Executable finite-region enumeration\<close>
