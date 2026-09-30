@@ -560,4 +560,179 @@ qed
 
 end
 
+subsection \<open>The driver\<close>
+
+definition g_step :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
+    (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_step \<Sigma> axs ns r W S = remdups (
+     g_refl \<Sigma> W @ g_assm \<Sigma> W @ g_beta \<Sigma> W @ g_axiom axs ns r W @
+     gscan W trans_fn S @ gscan W mk_comb_fn S @ g_abs \<Sigma> ns W S @
+     gscan W eq_mp_fn S @ gscan W antisym_fn S @ g_inst W S)"
+
+fun g_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow> nat \<Rightarrow>
+    (tm set \<times> tm) list \<Rightarrow> (tm set \<times> tm) list" where
+  "g_rounds \<Sigma> axs ns r W 0 S = S"
+| "g_rounds \<Sigma> axs ns r W (Suc k) S =
+    (let T = remdups (S @ g_step \<Sigma> axs ns r W S)
+     in if set T = set S then S else g_rounds \<Sigma> axs ns r W k T)"
+
+text \<open>
+  The universe actually used is the given list restricted to the terms that are well-typed and
+  built from the names @{text ns} within size @{text r}; @{text "(ns, r)"} is only needed to
+  query the axiom oracle, whose specification is stated for such terms.
+\<close>
+
+definition g_universe :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow> tm list" where
+  "g_universe \<Sigma> ns r U = filter (tm_ok ns \<Sigma> r) (remdups U)"
+
+definition g_bound :: "tm list \<Rightarrow> nat" where
+  "g_bound W = 2 ^ length W * length W"
+
+definition gflood_decide :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> tm list \<Rightarrow>
+    (tm set \<times> tm) \<Rightarrow> bool" where
+  "gflood_decide \<Sigma> axs ns r U p =
+    (let W = g_universe \<Sigma> ns r U in p \<in> set (g_rounds \<Sigma> axs ns r W (g_bound W) []))"
+
+context hol_lite_axs
+begin
+
+lemma set_g_universe: "set (g_universe \<Sigma> ns r U) = set U \<inter> Tm_wt (set ns) \<Sigma> r"
+  by (auto simp: g_universe_def tm_ok_iff set_enum_tm)
+
+lemma distinct_g_universe: "distinct (g_universe \<Sigma> ns r U)"
+  by (simp add: g_universe_def)
+
+lemma g_step_sound:
+  assumes S: "\<forall>p\<in>set S. gderiv (set W) p" and Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>q\<in>set (g_step \<Sigma> axs ns r W S). gderiv (set W) q"
+proof -
+  have a5: "\<forall>q\<in>set (gscan W trans_fn S). gderiv (set W) q"
+    by (rule gscan_sound[OF _ S]) (use trans_fn_sound in blast)
+  have a6: "\<forall>q\<in>set (gscan W mk_comb_fn S). gderiv (set W) q"
+    by (rule gscan_sound[OF _ S]) (use mk_comb_fn_sound in blast)
+  have a8: "\<forall>q\<in>set (gscan W eq_mp_fn S). gderiv (set W) q"
+    by (rule gscan_sound[OF _ S]) (use eq_mp_fn_sound in blast)
+  have a9: "\<forall>q\<in>set (gscan W antisym_fn S). gderiv (set W) q"
+    by (rule gscan_sound[OF _ S]) (use antisym_fn_sound in blast)
+  note a1 = g_refl_sound and a2 = g_assm_sound and a3 = g_beta_sound and a4 = g_axiom_sound
+    and a7 = g_abs_sound[OF S] and a10 = g_inst_sound[OF S Wt]
+  show ?thesis
+    unfolding g_step_def set_remdups set_append
+    using a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 by blast
+qed
+
+lemma g_rounds_sound:
+  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r"
+  shows "\<forall>p\<in>set S. gderiv (set W) p \<Longrightarrow>
+         \<forall>p\<in>set (g_rounds \<Sigma> axs ns r W k S). gderiv (set W) p"
+proof (induction k arbitrary: S)
+  case 0
+  then show ?case by simp
+next
+  case (Suc k)
+  let ?T = "remdups (S @ g_step \<Sigma> axs ns r W S)"
+  have "\<forall>p\<in>set ?T. gderiv (set W) p"
+    using Suc.prems g_step_sound[OF Suc.prems Wt] by auto
+  then show ?case
+    using Suc.IH[of ?T] Suc.prems by (auto simp: Let_def split: if_splits)
+qed
+
+lemma step_of_refl: "q \<in> set (g_refl \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_assm: "q \<in> set (g_assm \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_beta: "q \<in> set (g_beta \<Sigma> W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_axiom: "q \<in> set (g_axiom axs ns r W) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_trans: "q \<in> set (gscan W trans_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_mk_comb: "q \<in> set (gscan W mk_comb_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_abs: "q \<in> set (g_abs \<Sigma> ns W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_eq_mp: "q \<in> set (gscan W eq_mp_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_antisym: "q \<in> set (gscan W antisym_fn S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+lemma step_of_inst: "q \<in> set (g_inst W S) \<Longrightarrow> q \<in> set (g_step \<Sigma> axs ns r W S)"
+  by (simp add: g_step_def)
+
+text \<open>
+  Completeness relative to the universe: a set of sequents inside the region that is closed under
+  the executable step contains every derivation of @{text gderiv}.
+\<close>
+
+lemma closed_contains_gderiv:
+  assumes Wt: "set W \<subseteq> Tm_wt (set ns) \<Sigma> r" and F: "set F \<subseteq> Sequent_U (set W)"
+    and closed: "set (g_step \<Sigma> axs ns r W F) \<subseteq> set F"
+  shows "gderiv (set W) p \<Longrightarrow> p \<in> set F"
+proof (induction rule: gderiv.induct)
+  case (grefl t \<tau>)
+  have "({}, mk_eq \<tau> t t) \<in> set (g_refl \<Sigma> W)" by (rule g_refl_cover[OF grefl.hyps(1) grefl.hyps(2)])
+  then have "({}, mk_eq \<tau> t t) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_refl)
+  with closed show ?case by blast
+next
+  case (gtrans \<Gamma> \<tau> s t \<Delta> u)
+  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (gscan W trans_fn F)"
+    by (rule gscan_cover[where f = trans_fn, OF gtrans.IH(1) gtrans.IH(2) trans_fn_cover gtrans.hyps(3)])
+  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> s u) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_trans)
+  with closed show ?case by blast
+next
+  case (gmk_comb \<Gamma> \<sigma> \<tau> f g \<Delta> a b)
+  have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (gscan W mk_comb_fn F)"
+    by (rule gscan_cover[where f = mk_comb_fn, OF gmk_comb.IH(1) gmk_comb.IH(2) mk_comb_fn_cover gmk_comb.hyps(3)])
+  then have "(\<Gamma> \<union> \<Delta>, mk_eq \<tau> (App f a) (App g b)) \<in> set (g_step \<Sigma> axs ns r W F)"
+    by (rule step_of_mk_comb)
+  with closed show ?case by blast
+next
+  case (gabs \<Gamma> \<tau> s t \<sigma> x)
+  have "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
+        \<in> set (g_abs \<Sigma> ns W F)"
+    by (rule g_abs_cover[OF gabs.IH F Wt gabs.hyps(2) gabs.hyps(3) gabs.hyps(4)])
+  then have "(\<Gamma>, mk_eq (funT \<sigma> \<tau>) (Abs \<sigma> (abs_fv 0 x \<sigma> s)) (Abs \<sigma> (abs_fv 0 x \<sigma> t)))
+        \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_abs)
+  with closed show ?case by blast
+next
+  case (gbeta \<sigma> b \<tau> x)
+  have "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b)) \<in> set (g_beta \<Sigma> W)"
+    by (rule g_beta_cover[OF gbeta.hyps(1) gbeta.hyps(2)])
+  then have "({}, mk_eq \<tau> (App (Abs \<sigma> b) (Fv x \<sigma>)) (subst_bv 0 (Fv x \<sigma>) b))
+      \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_beta)
+  with closed show ?case by blast
+next
+  case (gassm p)
+  have "({p}, p) \<in> set (g_assm \<Sigma> W)" by (rule g_assm_cover[OF gassm.hyps(1) gassm.hyps(2)])
+  then have "({p}, p) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_assm)
+  with closed show ?case by blast
+next
+  case (geq_mp \<Gamma> p q \<Delta>)
+  have "(\<Gamma> \<union> \<Delta>, q) \<in> set (gscan W eq_mp_fn F)"
+    by (rule gscan_cover[where f = eq_mp_fn, OF geq_mp.IH(1) geq_mp.IH(2) eq_mp_fn_cover geq_mp.hyps(3)])
+  then have "(\<Gamma> \<union> \<Delta>, q) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_eq_mp)
+  with closed show ?case by blast
+next
+  case (gdeduct_antisym \<Gamma> p \<Delta> q)
+  have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (gscan W antisym_fn F)"
+    by (rule gscan_cover[where f = antisym_fn, OF gdeduct_antisym.IH(1) gdeduct_antisym.IH(2) antisym_fn_cover
+        gdeduct_antisym.hyps(3)])
+  then have "((\<Gamma> - {q}) \<union> (\<Delta> - {p}), mk_eq boolT p q) \<in> set (g_step \<Sigma> axs ns r W F)"
+    by (rule step_of_antisym)
+  with closed show ?case by blast
+next
+  case (ginst_type \<Gamma> c \<theta>)
+  have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_inst W F)"
+    by (rule g_inst_cover[OF ginst_type.IH F ginst_type.hyps(3)])
+  then have "(tinst \<theta> ` \<Gamma>, tinst \<theta> c) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_inst)
+  with closed show ?case by blast
+next
+  case (gaxiom p)
+  have "({}, p) \<in> set (g_axiom axs ns r W)"
+    by (rule g_axiom_cover[OF gaxiom.hyps(1) gaxiom.hyps(2) Wt])
+  then have "({}, p) \<in> set (g_step \<Sigma> axs ns r W F)" by (rule step_of_axiom)
+  with closed show ?case by blast
+qed
+
+end
+
 end
