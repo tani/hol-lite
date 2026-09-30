@@ -1,5 +1,5 @@
-theory HOL_Lite_L5
-  imports HOL_Lite_L1 HOL_Lite_L6 HOL_Lite_Kernel
+theory HOL_Lite_Bounded_Derivation
+  imports HOL_Lite_Search_Spaces HOL_Lite_Checker_Completeness HOL_Lite_Kernel
 begin
 
 section \<open>A clipped step relation on the bounded search space\<close>
@@ -8,7 +8,7 @@ context hol_lite
 begin
 
 text \<open>
-  The region @{term "Sequent_r N \<Sigma> r"} from \<open>HOL_Lite_L1\<close> is NOT closed under the rules of
+  The region @{term "Sequent_r N \<Sigma> r"} from \<open>HOL_Lite_Search_Spaces\<close> is NOT closed under the rules of
   @{const derivable}: \<open>abs\<close>, \<open>beta\<close> and \<open>inst_type\<close> may produce names or sizes outside @{term N},
   @{term r}.  We therefore define a CLIPPED step @{term "bderiv N r"}: the same rules as
   @{const derivable} (minus \<open>inst\<close>, whose premise is unsatisfiable, see below), where every

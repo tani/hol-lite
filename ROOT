@@ -8,11 +8,13 @@ session "HOL-Lite" = HOL +
     HOL_Lite_Kernel
     HOL_Lite_Derived
     HOL_Lite_Check
-    HOL_Lite_L1
-    HOL_Lite_L6
-    HOL_Lite_L3
-    HOL_Lite_L5
-    HOL_Lite_L7
-    HOL_Lite_L8
+    HOL_Lite_Search_Spaces
+    HOL_Lite_Checker_Completeness
+    HOL_Lite_Finite_Type_Instantiation
+    HOL_Lite_Bounded_Derivation
+    HOL_Lite_Step_Operators_Core
+    HOL_Lite_Step_Operators_Abs_Inst
+    HOL_Lite_Saturation
     HOL_Lite_Waterfall
+    HOL_Lite_Flood
     HOL_Lite_Bounded_Examples

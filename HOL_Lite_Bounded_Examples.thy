@@ -1,5 +1,5 @@
 theory HOL_Lite_Bounded_Examples
-  imports HOL_Lite_Waterfall
+  imports HOL_Lite_Flood
 begin
 
 definition empty_axs :: "name set \<Rightarrow> nat \<Rightarrow> tm list" where
@@ -29,15 +29,15 @@ lemma bounded_refl_iteration:
   by simp
 
 lemma executable_assumption:
-  "bounded_decide base_hsig empty_axs [''bool'', ''p''] 2 ({Fv ''p'' boolT}, Fv ''p'' boolT)"
+  "flood_decide base_hsig empty_axs [''bool'', ''p''] 2 ({Fv ''p'' boolT}, Fv ''p'' boolT)"
   by eval
 
 lemma executable_non_theorem:
-  "\<not> bounded_decide base_hsig empty_axs [''bool'', ''p''] 2 ({}, Fv ''p'' boolT)"
+  "\<not> flood_decide base_hsig empty_axs [''bool'', ''p''] 2 ({}, Fv ''p'' boolT)"
   by eval
 
 lemma executable_waterfall:
-  "waterfall 1 [bounded_processor base_hsig empty_axs [''bool'', ''p''] 2]
+  "waterfall 1 [flood_processor base_hsig empty_axs [''bool'', ''p''] 2]
      ([Fv ''p'' boolT], Fv ''p'' boolT) = []"
   by eval
 

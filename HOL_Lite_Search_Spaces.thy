@@ -1,4 +1,4 @@
-theory HOL_Lite_L1
+theory HOL_Lite_Search_Spaces
   imports HOL_Lite_Check
 begin
 

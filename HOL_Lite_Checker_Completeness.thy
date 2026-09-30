@@ -1,4 +1,4 @@
-theory HOL_Lite_L6
+theory HOL_Lite_Checker_Completeness
   imports HOL_Lite_Check
 begin
 

@@ -1,5 +1,5 @@
-theory HOL_Lite_L3
-  imports HOL_Lite_Kernel HOL_Lite_L1
+theory HOL_Lite_Finite_Type_Instantiation
+  imports HOL_Lite_Kernel HOL_Lite_Search_Spaces
 begin
 
 section \<open>Finite representatives for type instantiation\<close>
@@ -19,7 +19,7 @@ text \<open>
 subsection \<open>Type variables occurring in types and terms\<close>
 
 text \<open>
-  @{const ty_names}/@{const tm_names} from \<open>HOL_Lite_L1\<close> collect ALL names (type
+  @{const ty_names}/@{const tm_names} from \<open>HOL_Lite_Search_Spaces\<close> collect ALL names (type
   constructors, constants, free variables) occurring in a type/term. Here we need the strictly
   smaller set of type VARIABLE names, i.e. the domain on which a type substitution @{term \<theta>} can
   possibly affect the type/term.
@@ -283,7 +283,7 @@ text \<open>
   conclusion @{term c} and every hypothesis in @{term \<Gamma>} are instantiated by the same @{term \<theta>}.
   The finite-representative fact @{thm inst_type_range_eq} above generalizes verbatim to the
   hypothesis-set image @{term "tinst \<theta> ` \<Gamma>"} of a *finite* @{term \<Gamma>} (finiteness of @{term \<Gamma>} is
-  proved separately for derivable sequents in \<open>HOL_Lite_L5\<close>, so it always holds for
+  proved separately for derivable sequents in \<open>HOL_Lite_Bounded_Derivation\<close>, so it always holds for
   hypothesis sets of derivable sequents): only the finitely many type variables occurring
   somewhere in @{term \<Gamma>} (the finite union @{term "(\<Union>p\<in>\<Gamma>. tm_tyvars p)"}) matter, and @{term \<theta>}
   may again be replaced by a variant valued in @{term "Ty N \<Sigma> r"} on that finite set and equal to
