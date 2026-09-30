@@ -129,13 +129,38 @@ text \<open>
   locale. These definitions are the sole implementation of each rule step: @{text runtime_step}
   below composes them directly rather than restating the rule bodies a second time.\<close>
 
+text \<open>Region membership is decided by a direct predicate instead of a linear search in the
+  enumerated list @{const enum_tm}; the two agree by @{text tm_ok_iff}.  Every candidate
+  sequent produced by a rule step is checked, so this test dominates the cost of a round.\<close>
+
+definition ty_ok :: "name list \<Rightarrow> hsig \<Rightarrow> nat \<Rightarrow> ty \<Rightarrow> bool" where
+  "ty_ok ns \<Sigma> r \<tau> = (wf_ty \<Sigma> \<tau> \<and> ty_size \<tau> \<le> r \<and> ty_names \<tau> \<subseteq> set ns)"
+
+lemma ty_ok_iff [simp]: "ty_ok ns \<Sigma> r \<tau> \<longleftrightarrow> \<tau> \<in> Ty (set ns) \<Sigma> r"
+  by (simp add: ty_ok_def Ty_def)
+
+fun wf_tm_ex :: "name list \<Rightarrow> hsig \<Rightarrow> nat \<Rightarrow> tm \<Rightarrow> bool" where
+  "wf_tm_ex ns \<Sigma> r (Fv x \<tau>) = (x \<in> set ns \<and> ty_ok ns \<Sigma> r \<tau>)"
+| "wf_tm_ex ns \<Sigma> r (Bv i) = (i \<le> r)"
+| "wf_tm_ex ns \<Sigma> r (Cst c \<tau>) = (c \<in> set ns \<and> ty_ok ns \<Sigma> r \<tau>)"
+| "wf_tm_ex ns \<Sigma> r (App f a) = (wf_tm_ex ns \<Sigma> r f \<and> wf_tm_ex ns \<Sigma> r a)"
+| "wf_tm_ex ns \<Sigma> r (Abs \<tau> b) = (ty_ok ns \<Sigma> r \<tau> \<and> wf_tm_ex ns \<Sigma> r b)"
+
+lemma wf_tm_ex_iff [simp]: "wf_tm_ex ns \<Sigma> r t \<longleftrightarrow> wf_tm (set ns) \<Sigma> r t"
+  by (induction t) simp_all
+
+definition tm_ok :: "name list \<Rightarrow> hsig \<Rightarrow> nat \<Rightarrow> tm \<Rightarrow> bool" where
+  "tm_ok ns \<Sigma> r t = (tm_size t \<le> r \<and> wf_tm_ex ns \<Sigma> r t \<and> typeof \<Sigma> [] t \<noteq> None)"
+
+lemma tm_ok_iff: "tm_ok ns \<Sigma> r t \<longleftrightarrow> t \<in> set (enum_tm ns \<Sigma> r)"
+  by (simp add: tm_ok_def set_enum_tm Tm_wt_def Tm_def)
+
 definition runtime_bounded :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> (tm set \<times> tm) \<Rightarrow> bool" where
-  "runtime_bounded \<Sigma> ns r p =
-    (fst p \<subseteq> set (enum_tm ns \<Sigma> r) \<and> snd p \<in> set (enum_tm ns \<Sigma> r))"
+  "runtime_bounded \<Sigma> ns r p = ((\<forall>t\<in>fst p. tm_ok ns \<Sigma> r t) \<and> tm_ok ns \<Sigma> r (snd p))"
 
 lemma runtime_bounded_iff [simp]:
   "runtime_bounded \<Sigma> ns r p \<longleftrightarrow> p \<in> Sequent_r (set ns) \<Sigma> r"
-  by (cases p) (simp add: runtime_bounded_def Sequent_r_def set_enum_tm)
+  by (cases p) (auto simp: runtime_bounded_def Sequent_r_def tm_ok_iff set_enum_tm subset_iff)
 
 definition runtime_scan :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow>
   ((tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) \<Rightarrow> (tm set \<times> tm) option) \<Rightarrow>
@@ -637,13 +662,41 @@ fun flood_rounds :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow
     (let T = remdups (S @ runtime_step \<Sigma> axs ns r S)
      in if set T = set S then S else flood_rounds \<Sigma> axs ns r k T)"
 
+text \<open>@{text flood_search} is @{text flood_rounds} with an early exit: it stops as soon as the
+  goal @{text p} is among the sequents generated so far.  Since every round only adds sequents,
+  the answer is the same as membership in the final saturated set (@{text flood_search_iff}).\<close>
+
+fun flood_search :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow>
+    (tm set \<times> tm) \<Rightarrow> nat \<Rightarrow> (tm set \<times> tm) list \<Rightarrow> bool" where
+  "flood_search \<Sigma> axs ns r p 0 S = (p \<in> set S)"
+| "flood_search \<Sigma> axs ns r p (Suc k) S =
+    (p \<in> set S \<or>
+     (let T = remdups (S @ runtime_step \<Sigma> axs ns r S)
+      in set T \<noteq> set S \<and> flood_search \<Sigma> axs ns r p k T))"
+
+lemma set_flood_rounds_superset: "set S \<subseteq> set (flood_rounds \<Sigma> axs ns r k S)"
+proof (induction k arbitrary: S)
+  case 0 then show ?case by simp
+next
+  case (Suc k)
+  let ?T = "remdups (S @ runtime_step \<Sigma> axs ns r S)"
+  have ST: "set S \<subseteq> set ?T" by auto
+  show ?case
+  proof (cases "set ?T = set S")
+    case True then show ?thesis by (simp add: Let_def)
+  next
+    case False
+    then show ?thesis using ST Suc.IH[of ?T] by (auto simp: Let_def)
+  qed
+qed
+
 definition flood_bound :: "hsig \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> nat" where
   "flood_bound \<Sigma> ns r = 2 ^ length (enum_tm ns \<Sigma> r) * length (enum_tm ns \<Sigma> r)"
 
 definition flood_decide :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow>
     (tm set \<times> tm) \<Rightarrow> bool" where
   "flood_decide \<Sigma> axs ns r p =
-    (p \<in> set (flood_rounds \<Sigma> axs ns r (flood_bound \<Sigma> ns r) []))"
+    flood_search \<Sigma> axs ns r p (flood_bound \<Sigma> ns r) []"
 
 definition flood_processor :: "hsig \<Rightarrow> (name set \<Rightarrow> nat \<Rightarrow> tm list) \<Rightarrow> name list \<Rightarrow> nat \<Rightarrow> processor" where
   "flood_processor \<Sigma> axs ns r g =
@@ -687,6 +740,40 @@ next
   qed
 qed
 
+lemma flood_search_iff:
+  assumes sub: "set S \<subseteq> Sequent_r (set ns) \<Sigma> r"
+  shows "flood_search \<Sigma> axs ns r p k S \<longleftrightarrow> p \<in> set (flood_rounds \<Sigma> axs ns r k S)"
+  using sub
+proof (induction k arbitrary: S)
+  case 0
+  then show ?case by simp
+next
+  case (Suc k)
+  let ?T = "remdups (S @ runtime_step \<Sigma> axs ns r S)"
+  have Tset: "set ?T = grow_r (set ns) r (set S)"
+    using set_runtime_step[OF Suc.prems] by (simp add: grow_r_def)
+  have Tsub: "set ?T \<subseteq> Sequent_r (set ns) \<Sigma> r"
+    using Tset grow_r_subset Suc.prems by blast
+  show ?case
+  proof (cases "p \<in> set S")
+    case True
+    have "p \<in> set (flood_rounds \<Sigma> axs ns r (Suc k) S)"
+      by (rule rev_subsetD[OF True set_flood_rounds_superset])
+    with True show ?thesis by simp
+  next
+    case False
+    note pS = False
+    show ?thesis
+    proof (cases "set ?T = set S")
+      case True
+      then show ?thesis using pS by (simp add: Let_def)
+    next
+      case False
+      then show ?thesis using Suc.IH[OF Tsub] pS by (simp add: Let_def)
+    qed
+  qed
+qed
+
 lemma flood_bound_card:
   "flood_bound \<Sigma> ns r = card (Sequent_r (set ns) \<Sigma> r)"
 proof -
@@ -698,7 +785,7 @@ qed
 theorem flood_decide_iff_bderiv:
   "flood_decide \<Sigma> axs ns r p \<longleftrightarrow> bderiv (set ns) r p"
   using set_flood_rounds[of "[]" ns r "flood_bound \<Sigma> ns r"]
-    bounded_iteration_iff_bderiv[of "set ns" p r]
+    bounded_iteration_iff_bderiv[of "set ns" p r] flood_search_iff[of "[]" ns r p "flood_bound \<Sigma> ns r"]
   by (simp add: flood_decide_def flood_bound_card iterate_r_def)
 
 corollary flood_decide_sound:
