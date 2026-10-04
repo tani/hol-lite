@@ -970,16 +970,22 @@ definition clause_depth :: "hterm \<Rightarrow> nat" where
   "clause_depth tm =
      foldl max 0 (map (\<lambda>r. var_depth_n (tm_size r) r) (concat (map lit_roots (disjuncts tm))))"
 
+text \<open>The terms generalized so far (the warehouse of generalizations, which prevents generalizing
+  the same term again after induction has reintroduced it) are scoped to the subtree of the
+  proof below the generalization step: sibling subgoals do not see each other's entries.\<close>
+
 definition pour_all ::
   "((hterm \<times> bool) \<Rightarrow> wst \<Rightarrow> hthm option \<times> wst) \<Rightarrow> (hterm \<times> bool) list \<Rightarrow> wst \<Rightarrow> hthm list option \<times> wst" where
   "pour_all f gs st =
-     foldl (\<lambda>(acc, s) g.
-              case acc of
-                None \<Rightarrow> (None, s)
-              | Some ths \<Rightarrow> (case f g s of
-                              (Some th, s') \<Rightarrow> (Some (ths @ [th]), s')
-                            | (None, s') \<Rightarrow> (None, s')))
-           (Some [], st) gs"
+     (let g0 = w_gened st in
+      case foldl (\<lambda>(acc, s) g.
+                    case acc of
+                      None \<Rightarrow> (None, s)
+                    | Some ths \<Rightarrow> (case f g (s\<lparr> w_gened := g0 \<rparr>) of
+                                    (Some th, s') \<Rightarrow> (Some (ths @ [th]), s')
+                                  | (None, s') \<Rightarrow> (None, s')))
+                 (Some [], st) gs
+      of (r, s) \<Rightarrow> (r, s\<lparr> w_gened := g0 \<rparr>))"
 
 primrec pour ::
   "nat \<Rightarrow> wctx \<Rightarrow> (hterm \<times> heur) list \<Rightarrow> hterm list \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hthm option \<times> wst" where
@@ -1046,10 +1052,18 @@ definition numb2 :: "hol_type" where "numb2 = fun_ty num_ty (fun_ty num_ty bool_
 definition le_c :: hterm where "le_c = Const ''<='' numb2"
 definition lt_c :: hterm where "lt_c = Const ''<'' numb2"
 
+definition exp_c :: hterm where "exp_c = Const ''EXP'' num2"
+definition sub_c :: hterm where "sub_c = Const ''-'' num2"
+definition even_c :: hterm where "even_c = Const ''EVEN'' (fun_ty num_ty bool_ty)"
+
 definition mk_suc :: "hterm \<Rightarrow> hterm" where "mk_suc t = Comb suc_c t"
 definition mk_pre :: "hterm \<Rightarrow> hterm" where "mk_pre t = Comb pre_c t"
 definition mk_add :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_add a b = Comb (Comb add_c a) b"
 definition mk_mul :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_mul a b = Comb (Comb mul_c a) b"
+
+definition mk_exp :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_exp a b = Comb (Comb exp_c a) b"
+definition mk_sub :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_sub a b = Comb (Comb sub_c a) b"
+definition mk_even :: "hterm \<Rightarrow> hterm" where "mk_even a = Comb even_c a"
 
 definition nm :: "string \<Rightarrow> hterm" where "nm s = Var s num_ty"
 
@@ -1087,7 +1101,8 @@ definition oneone_ax_tm :: hterm where
        (safe_mk_eq (safe_mk_eq (mk_suc (nm ''m'')) (mk_suc (nm ''n''))) (safe_mk_eq (nm ''m'') (nm ''n''))))"
 
 definition pre_ax_tm :: hterm where
-  "pre_ax_tm = mk_forall (nm ''n'') (safe_mk_eq (mk_pre (mk_suc (nm ''n''))) (nm ''n''))"
+  "pre_ax_tm = mk_conj (safe_mk_eq (mk_pre zero_c) zero_c)
+                       (mk_forall (nm ''n'') (safe_mk_eq (mk_pre (mk_suc (nm ''n''))) (nm ''n'')))"
 
 definition add_ax_tm :: hterm where
   "add_ax_tm =
@@ -1102,6 +1117,28 @@ definition mul_ax_tm :: hterm where
                 (safe_mk_eq (mk_mul (mk_suc (nm ''m'')) (nm ''n''))
                             (mk_add (mk_mul (nm ''m'') (nm ''n'')) (nm ''n'')))))"
 
+text \<open>Further primitive recursive functions of HOL Light's arithmetic: exponentiation, truncated
+  subtraction (recursion on the second argument) and @{text EVEN}.\<close>
+
+definition exp_ax_tm :: hterm where
+  "exp_ax_tm =
+     mk_conj (mk_forall (nm ''m'') (safe_mk_eq (mk_exp (nm ''m'') zero_c) (mk_suc zero_c)))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_exp (nm ''m'') (mk_suc (nm ''n'')))
+                            (mk_mul (nm ''m'') (mk_exp (nm ''m'') (nm ''n''))))))"
+
+definition sub_ax_tm :: hterm where
+  "sub_ax_tm =
+     mk_conj (mk_forall (nm ''m'') (safe_mk_eq (mk_sub (nm ''m'') zero_c) (nm ''m'')))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_sub (nm ''m'') (mk_suc (nm ''n'')))
+                            (mk_pre (mk_sub (nm ''m'') (nm ''n''))))))"
+
+definition even_ax_tm :: hterm where
+  "even_ax_tm =
+     mk_conj (safe_mk_eq (mk_even zero_c) T_tm)
+             (mk_forall (nm ''n'') (safe_mk_eq (mk_even (mk_suc (nm ''n''))) (mk_not (mk_even (nm ''n'')))))"
+
 text \<open>Build the theory of Peano arithmetic in the kernel: one new type, five constants and the
   Peano axioms (including the defining equations of @{text "+"} and @{text "*"}).\<close>
 
@@ -1114,7 +1151,10 @@ definition peano_init :: "(kstate \<times> hthm list) option" where
           k5 \<leftarrow> new_constant k4 (''+'', num2);
           k6a \<leftarrow> new_constant k5 (''*'', num2);
           k6b \<leftarrow> new_constant k6a (''<='', numb2);
-          k6 \<leftarrow> new_constant k6b (''<'', numb2);
+          k6c \<leftarrow> new_constant k6b (''<'', numb2);
+          k6d \<leftarrow> new_constant k6c (''EXP'', num2);
+          k6e \<leftarrow> new_constant k6d (''-'', num2);
+          k6 \<leftarrow> new_constant k6e (''EVEN'', fun_ty num_ty bool_ty);
           (k7, t1) \<leftarrow> new_axiom k6 ind_ax_tm;
           (k8, t2) \<leftarrow> new_axiom k7 distinct_ax_tm;
           (k9, t3) \<leftarrow> new_axiom k8 oneone_ax_tm;
@@ -1123,7 +1163,10 @@ definition peano_init :: "(kstate \<times> hthm list) option" where
           (k12, t6) \<leftarrow> new_axiom k11 mul_ax_tm;
           (k13, t7) \<leftarrow> new_axiom k12 le_ax_tm;
           (k14, t8) \<leftarrow> new_axiom k13 lt_ax_tm;
-          Some (k14, [t1, t2, t3, t4, t5, t6, t7, t8]) }"
+          (k15, t9) \<leftarrow> new_axiom k14 exp_ax_tm;
+          (k16, t10) \<leftarrow> new_axiom k15 sub_ax_tm;
+          (k17, t11) \<leftarrow> new_axiom k16 even_ax_tm;
+          Some (k17, [t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11]) }"
 
 definition peano_thm :: "nat \<Rightarrow> hthm" where "peano_thm i = snd (the peano_init) ! i"
 
@@ -1135,7 +1178,8 @@ definition nat_shell :: shell where
 
 definition nat_rules :: "hthm list" where
   "nat_rules = mk_rewrites_l (sh_distinct nat_shell @ sh_oneone nat_shell @ sh_accdefs nat_shell
-                              @ [peano_thm 4, peano_thm 5, peano_thm 6, peano_thm 7])"
+                              @ [peano_thm 4, peano_thm 5, peano_thm 6, peano_thm 7,
+                                 peano_thm 8, peano_thm 9, peano_thm 10])"
 
 definition nat_ctx :: "heur list \<Rightarrow> wctx" where
   "nat_ctx order =
@@ -1338,6 +1382,104 @@ lemma taut_heuristic_example:
           (mk_disj (mk_disj (Var ''x'' bool_ty) (Var ''y'' bool_ty))
                    (mk_conj (mk_neg (Var ''x'' bool_ty)) (mk_neg (Var ''y'' bool_ty)))) of
       HProved th \<Rightarrow> hyp th = [] | _ \<Rightarrow> False)"
+  by eval
+
+
+section \<open>Evaluation set\<close>
+
+text \<open>A set of theorems from HOL Light's arithmetic (@{text arith.ml}/@{text num.ml}) and list theory,
+  given to the prover as conjectures, as in the paper's evaluation (Section 5).  @{text eval_report}
+  lists, for each theorem, whether BMF proved it and the numbers of steps, inductions and
+  generalizations.\<close>
+
+definition vq :: hterm where "vq = nm ''q''"
+
+definition ar :: "string \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> string \<times> hterm" where
+  "ar name vs t = (name, mk_foralls vs t)"
+
+definition eqn :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" (infix "\<approx>" 50) where "eqn = safe_mk_eq"
+
+definition eval_set :: "(string \<times> hterm) list" where
+  "eval_set =
+    [ ar ''ADD_0'' [vm] (mk_add vm zero_c \<approx> vm),
+      ar ''ADD_SUC'' [vm, vn] (mk_add vm (mk_suc vn) \<approx> mk_suc (mk_add vm vn)),
+      ar ''ADD_SYM'' [vm, vn] (mk_add vm vn \<approx> mk_add vn vm),
+      ar ''ADD_ASSOC'' [vm, vn, vk] (mk_add vm (mk_add vn vk) \<approx> mk_add (mk_add vm vn) vk),
+      ar ''ADD_EQ_0'' [vm, vn] (((mk_add vm vn) \<approx> zero_c) \<approx> mk_conj (vm \<approx> zero_c) (vn \<approx> zero_c)),
+      ar ''EQ_ADD_LCANCEL'' [vm, vn, vk] ((mk_add vm vn \<approx> mk_add vm vk) \<approx> (vn \<approx> vk)),
+      ar ''EQ_ADD_RCANCEL'' [vm, vn, vk] ((mk_add vm vk \<approx> mk_add vn vk) \<approx> (vm \<approx> vn)),
+      ar ''ADD_AC_1'' [vm, vn, vk] (mk_add vm (mk_add vn vk) \<approx> mk_add vn (mk_add vm vk)),
+      ar ''MULT_0'' [vm] (mk_mul vm zero_c \<approx> zero_c),
+      ar ''MULT_SUC'' [vm, vn] (mk_mul vm (mk_suc vn) \<approx> mk_add vm (mk_mul vm vn)),
+      ar ''MULT_SYM'' [vm, vn] (mk_mul vm vn \<approx> mk_mul vn vm),
+      ar ''MULT_ASSOC'' [vm, vn, vk] (mk_mul vm (mk_mul vn vk) \<approx> mk_mul (mk_mul vm vn) vk),
+      ar ''LEFT_ADD_DISTRIB'' [vm, vn, vk] (mk_mul vm (mk_add vn vk) \<approx> mk_add (mk_mul vm vn) (mk_mul vm vk)),
+      ar ''RIGHT_ADD_DISTRIB'' [vm, vn, vk] (mk_mul (mk_add vm vn) vk \<approx> mk_add (mk_mul vm vk) (mk_mul vn vk)),
+      ar ''MULT_1'' [vm] (mk_mul vm (mk_suc zero_c) \<approx> vm),
+      ar ''EXP_1'' [vm] (mk_exp vm (mk_suc zero_c) \<approx> vm),
+      ar ''ONE_EXP'' [vn] (mk_exp (mk_suc zero_c) vn \<approx> mk_suc zero_c),
+      ar ''EXP_ADD'' [vm, vn, vk] (mk_exp vm (mk_add vn vk) \<approx> mk_mul (mk_exp vm vn) (mk_exp vm vk)),
+      ar ''MULT_EXP'' [vm, vn, vk] (mk_exp (mk_mul vm vn) vk \<approx> mk_mul (mk_exp vm vk) (mk_exp vn vk)),
+      ar ''EXP_MULT'' [vm, vn, vk] (mk_exp vm (mk_mul vn vk) \<approx> mk_exp (mk_exp vm vn) vk),
+      ar ''LE_REFL'' [vm] (mk_le vm vm),
+      ar ''LE_0'' [vn] (mk_le zero_c vn),
+      ar ''LT_REFL'' [vm] (mk_not (mk_lt vm vm)),
+      ar ''LT_0'' [vn] (mk_lt zero_c (mk_suc vn)),
+      ar ''LE_SUC_LT'' [vm, vn] (mk_le (mk_suc vm) vn \<approx> mk_lt vm vn),
+      ar ''LT_SUC_LE'' [vm, vn] (mk_lt vm (mk_suc vn) \<approx> mk_le vm vn),
+      ar ''LE_LT'' [vm, vn] (mk_le vm vn \<approx> mk_disj (mk_lt vm vn) (vm \<approx> vn)),
+      ar ''LE_TRANS'' [vm, vn, vk] (mk_imp (mk_le vm vn) (mk_imp (mk_le vn vk) (mk_le vm vk))),
+      ar ''LE_ANTISYM'' [vm, vn] (mk_conj (mk_le vm vn) (mk_le vn vm) \<approx> (vm \<approx> vn)),
+      ar ''LE_ADD'' [vm, vn] (mk_le vm (mk_add vm vn)),
+      ar ''LT_IMP_LE'' [vm, vn] (mk_imp (mk_lt vm vn) (mk_le vm vn)),
+      ar ''NOT_LE'' [vm, vn] (mk_not (mk_le vm vn) \<approx> mk_lt vn vm),
+      ar ''NOT_LT'' [vm, vn] (mk_not (mk_lt vm vn) \<approx> mk_le vn vm),
+      ar ''LE_ADD_LCANCEL'' [vm, vn, vk] (mk_le (mk_add vm vn) (mk_add vm vk) \<approx> mk_le vn vk),
+      ar ''LT_ADD_LCANCEL'' [vm, vn, vk] (mk_lt (mk_add vm vn) (mk_add vm vk) \<approx> mk_lt vn vk),
+      ar ''LE_MULT_LCANCEL_0'' [vm] (mk_le zero_c (mk_mul vm vm)),
+      ar ''LT_TRANS'' [vm, vn, vk] (mk_imp (mk_lt vm vn) (mk_imp (mk_lt vn vk) (mk_lt vm vk))),
+      ar ''LT_TRICHOTOMY'' [vm, vn] (mk_disj (mk_lt vm vn) (mk_disj (vm \<approx> vn) (mk_lt vn vm))),
+      ar ''SUB_0'' [vm] (mk_sub zero_c vm \<approx> zero_c),
+      ar ''SUB_REFL'' [vm] (mk_sub vm vm \<approx> zero_c),
+      ar ''ADD_SUB'' [vm, vn] (mk_sub (mk_add vm vn) vn \<approx> vm),
+      ar ''EVEN_ADD'' [vm, vn] (mk_even (mk_add vm vn) \<approx> (mk_even vm \<approx> mk_even vn)),
+      ar ''EVEN_MULT'' [vm, vn] (mk_even (mk_mul vm vn) \<approx> mk_disj (mk_even vm) (mk_even vn)),
+      ar ''EVEN_DOUBLE'' [vm] (mk_even (mk_add vm vm)),
+      ar ''APPEND_NIL'' [lv ''x''] (mk_append (lv ''x'') nil_c \<approx> lv ''x''),
+      ar ''APPEND_ASSOC'' [lv ''x'', lv ''y'', lv ''z'']
+         (mk_append (lv ''x'') (mk_append (lv ''y'') (lv ''z'')) \<approx> mk_append (mk_append (lv ''x'') (lv ''y'')) (lv ''z'')),
+      ar ''LENGTH_APPEND'' [lv ''x'', lv ''y'']
+         (mk_len (mk_append (lv ''x'') (lv ''y'')) \<approx> mk_add (mk_len (lv ''x'')) (mk_len (lv ''y''))),
+      ar ''LENGTH_REVERSE'' [lv ''x''] (mk_len (mk_rev (lv ''x'')) \<approx> mk_len (lv ''x'')),
+      ar ''REVERSE_REVERSE'' [lv ''x''] (mk_rev (mk_rev (lv ''x'')) \<approx> lv ''x''),
+      ar ''REVERSE_APPEND'' [lv ''x'', lv ''y'']
+         (mk_rev (mk_append (lv ''x'') (lv ''y'')) \<approx> mk_append (mk_rev (lv ''y'')) (mk_rev (lv ''x''))) ]"
+
+definition eval_one :: "string \<times> hterm \<Rightarrow> string" where
+  "eval_one p =
+     (let cx = (if tm_size (snd p) > 0 then list_ctx bmf_order else nat_ctx bmf_order)
+      in case bm_prove cx 40 (snd p) of
+           (r, st) \<Rightarrow> fst p @ '' '' @ (case r of Some th \<Rightarrow> if hyp th = [] \<and> aconv (concl th) (snd p) then ''OK'' else ''BAD'' | None \<Rightarrow> ''FAIL'')
+                     @ '' '' @ nat_str (w_steps st) @ '' '' @ nat_str (w_inds st) @ '' '' @ nat_str (w_gens st))"
+
+definition eval_report :: "string list" where
+  "eval_report = map eval_one eval_set"
+
+definition eval_ok :: "string \<times> hterm \<Rightarrow> bool" where
+  "eval_ok p = (case bm_prove (list_ctx bmf_order) 40 (snd p) of
+                  (Some th, _) \<Rightarrow> hyp th = [] \<and> aconv (concl th) (snd p)
+                | (None, _) \<Rightarrow> False)"
+
+definition eval_proved :: "string list" where
+  "eval_proved = [''ADD_0'', ''ADD_SUC'', ''ADD_SYM'', ''ADD_ASSOC'', ''ADD_EQ_0'', ''EQ_ADD_LCANCEL'', ''ADD_AC_1'', ''MULT_0'', ''MULT_SUC'', ''MULT_SYM'', ''MULT_ASSOC'', ''LEFT_ADD_DISTRIB'', ''RIGHT_ADD_DISTRIB'', ''MULT_1'', ''EXP_1'', ''ONE_EXP'', ''LE_REFL'', ''LE_0'', ''LT_0'', ''LE_SUC_LT'', ''LT_SUC_LE'', ''LE_LT'', ''LE_TRANS'', ''LT_IMP_LE'', ''LT_TRANS'', ''SUB_0'', ''APPEND_NIL'', ''APPEND_ASSOC'', ''LENGTH_APPEND'', ''LENGTH_REVERSE'', ''REVERSE_REVERSE'', ''REVERSE_APPEND'']"
+
+text \<open>BMF proves 32 of the 50 conjectures (64%; the paper reports 47% for its first test set).
+  The others need lemmas that the waterfall cannot speculate (e.g. @{text "SUC m \<noteq> m"} for
+  @{text "\<not> m < m"}, commutativity under a cancellation law, or induction on a term rather than a
+  variable for @{text "m \<le> m + n"}); @{text eval_report} lists them with their step counts.\<close>
+
+lemma eval_set_proved: "length eval_set = 50 \<and> list_all eval_ok (filter (\<lambda>p. fst p \<in> set eval_proved) eval_set)
+    \<and> length (filter (\<lambda>p. fst p \<in> set eval_proved) eval_set) = 32"
   by eval
 
 end
