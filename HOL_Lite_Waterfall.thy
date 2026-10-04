@@ -258,15 +258,40 @@ text \<open>Given the clause @{text tm}, the literal @{text l} (a negated equati
   oriented hypothesis @{text "{e} \<turnstile> a = b"}: rewrite the rest of the clause.  The justification
   turns a theorem of the rewritten rest into a theorem of the clause.\<close>
 
+text \<open>Replacement restricted to one side of the equations of a clause: @{text mode} 0 replaces
+  everywhere, 1 only in right-hand sides and 2 only in left-hand sides of equations.\<close>
+
+primrec replace_side_n :: "nat \<Rightarrow> hthm \<Rightarrow> nat \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "replace_side_n 0 th mode tm = Some (REFL tm)"
+| "replace_side_n (Suc k) th mode tm =
+     (case lhs th of
+        None \<Rightarrow> None
+      | Some a \<Rightarrow>
+          if mode = 0 then replace_conv th tm
+          else
+            (case dest_eq tm of
+               Some (x, y) \<Rightarrow>
+                 (case tm of
+                    Comb c _ \<Rightarrow>
+                      (if mode = 1 then do { ty \<leftarrow> replace_conv th y; AP_TERM c ty }
+                       else (case c of
+                               Comb c0 _ \<Rightarrow> do { tx \<leftarrow> replace_conv th x; a1 \<leftarrow> AP_TERM c0 tx; AP_THM a1 y }
+                             | _ \<Rightarrow> None))
+                  | _ \<Rightarrow> None)
+             | None \<Rightarrow>
+                 (case tm of
+                    Comb s t \<Rightarrow> do { a1 \<leftarrow> replace_side_n k th mode s; a2 \<leftarrow> replace_side_n k th mode t; MK_COMB a1 a2 }
+                  | _ \<Rightarrow> Some (REFL tm))))"
+
 definition rewrite_rest ::
-  "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> (hterm list \<times> (hthm list \<Rightarrow> hthm option)) option" where
-  "rewrite_rest tm l e swap keep_lit need_change =
+  "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> nat \<Rightarrow> (hterm list \<times> (hthm list \<Rightarrow> hthm option)) option" where
+  "rewrite_rest tm l e swap keep_lit need_change mode =
      (let ls = disjuncts tm; rest_ls = remove_first l ls in
       if rest_ls = [] then None
       else
         let rest = mk_clause rest_ls in
         do { th_o \<leftarrow> orient swap e;
-             eqr \<leftarrow> replace_conv th_o rest;
+             eqr \<leftarrow> replace_side_n (tm_size rest + 2) th_o mode rest;
              rest' \<leftarrow> rhs eqr;
              (if need_change \<and> aconv rest rest' then None else
               let goal = (if keep_lit then mk_disj l rest' else rest') in
@@ -299,7 +324,7 @@ definition h_subst :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
                               else if is_var y \<and> y \<notin> set (frees x) then Some (l, e, True)
                               else None)
                          | None \<Rightarrow> None) ls;
-          tries = List.map_filter (\<lambda>(l, e, sw). rewrite_rest tm l e sw False False) cands
+          tries = List.map_filter (\<lambda>(l, e, sw). rewrite_rest tm l e sw False False 0) cands
       in case tries of
            [] \<Rightarrow> HFail
          | (gs, j) # _ \<Rightarrow> HSub gs j)"
@@ -311,14 +336,14 @@ definition h_equal :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
           cands = concat (List.map_filter
                     (\<lambda>l. case neg_eq_parts l of
                            Some (e, x, y) \<Rightarrow>
-                             Some ((if \<not> is_var x \<and> \<not> is_template shs x \<and> \<not> aconv x y
-                                    then [(l, e, False)] else []) @
-                                   (if \<not> is_var y \<and> \<not> is_template shs y \<and> \<not> aconv x y
-                                    then [(l, e, True)] else []))
+                             (let mk = (\<lambda>a sw. if is_template shs a \<or> aconv x y then []
+                                               else if is_var a then [(l, e, sw, 1::nat), (l, e, sw, 2)]
+                                               else [(l, e, sw, 0)])
+                              in Some (mk x False @ mk y True))
                          | None \<Rightarrow> None) ls);
           tries = List.map_filter
-                    (\<lambda>(l, e, sw).
-                       (case rewrite_rest tm l e sw (\<not> ind) True of
+                    (\<lambda>(l, e, sw, md).
+                       (case rewrite_rest tm l e sw (\<not> ind) True md of
                           Some (gs, j) \<Rightarrow>
                             (case gs of
                                [g] \<Rightarrow> (if aconv g tm then None else Some (gs, j))
@@ -401,6 +426,9 @@ definition h_irrel :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
 
 section \<open>Counterexample checker (4.4.3)\<close>
 
+fun nat_str :: "nat \<Rightarrow> string" where
+  "nat_str n = (if n < 10 then [char_of (48 + n)] else nat_str (n div 10) @ [char_of (48 + n mod 10)])"
+
 definition rnd :: "nat \<Rightarrow> nat" where
   "rnd s = (s * 1103515245 + 12345) mod 2147483648"
 
@@ -428,7 +456,7 @@ primrec gen_val_n :: "nat \<Rightarrow> shell \<Rightarrow> nat \<Rightarrow> ht
                                 then (case gen_val_n d sh s of
                                         (Some a, s') \<Rightarrow> (Some (args @ [a]), s')
                                       | (None, s') \<Rightarrow> (None, s'))
-                                else (None, s)) (Some [], s1) tys of
+                                else (Some (args @ [Var (''e'' @ nat_str s) ty]), rnd s)) (Some [], s1) tys of
                 (Some args, s2) \<Rightarrow> (list_mk_comb c args, s2)
               | (None, s2) \<Rightarrow> (None, s2))))"
 
@@ -444,7 +472,7 @@ definition ground_clause ::
                          (None, s) \<Rightarrow> (None, s)
                        | (Some th, s) \<Rightarrow>
                            (case shell_of_type (w_shells cx) (type_of v) of
-                              None \<Rightarrow> (None, s)
+                              None \<Rightarrow> (Some th, s)
                             | Some sh \<Rightarrow>
                                 (case gen_val_n 4 sh s of
                                    (Some t, s') \<Rightarrow> (Some (th @ [(t, v)]), s')
@@ -999,5 +1027,196 @@ definition nat_ctx :: "heur list \<Rightarrow> wctx" where
   "nat_ctx order =
      \<lparr> w_shells = [nat_shell], w_rules = nat_rules, w_glemmas = [], w_order = order,
        w_maxdepth = 12, w_ncex = 5, w_rwfuel = 200 \<rparr>"
+
+
+section \<open>A second shell: polymorphic lists\<close>
+
+definition lty :: hol_type where "lty = Tyapp ''list'' [aty]"
+definition nil_c :: hterm where "nil_c = Const ''NIL'' lty"
+definition cons_c :: hterm where "cons_c = Const ''CONS'' (fun_ty aty (fun_ty lty lty))"
+definition hd_c :: hterm where "hd_c = Const ''HD'' (fun_ty lty aty)"
+definition tl_c :: hterm where "tl_c = Const ''TL'' (fun_ty lty lty)"
+definition append_c :: hterm where "append_c = Const ''APPEND'' (fun_ty lty (fun_ty lty lty))"
+definition rev_c :: hterm where "rev_c = Const ''REVERSE'' (fun_ty lty lty)"
+definition len_c :: hterm where "len_c = Const ''LENGTH'' (fun_ty lty num_ty)"
+
+definition lv :: "string \<Rightarrow> hterm" where "lv s = Var s lty"
+definition av :: "string \<Rightarrow> hterm" where "av s = Var s aty"
+definition mk_cons :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_cons a l = Comb (Comb cons_c a) l"
+definition mk_append :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_append a b = Comb (Comb append_c a) b"
+definition mk_rev :: "hterm \<Rightarrow> hterm" where "mk_rev l = Comb rev_c l"
+definition mk_len :: "hterm \<Rightarrow> hterm" where "mk_len l = Comb len_c l"
+
+definition mk_foralls :: "hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "mk_foralls vs body = foldr mk_forall vs body"
+
+definition list_ind_tm :: hterm where
+  "list_ind_tm =
+     (let P = Var ''P'' (fun_ty lty bool_ty) in
+      mk_forall P
+        (mk_imp (mk_conj (Comb P nil_c)
+                         (mk_foralls [av ''a'', lv ''l''] (mk_imp (Comb P (lv ''l'')) (Comb P (mk_cons (av ''a'') (lv ''l''))))))
+                (mk_forall (lv ''l'') (Comb P (lv ''l'')))))"
+
+definition list_distinct_tm :: hterm where
+  "list_distinct_tm = mk_foralls [av ''a'', lv ''l''] (mk_not (safe_mk_eq (mk_cons (av ''a'') (lv ''l'')) nil_c))"
+
+definition list_oneone_tm :: hterm where
+  "list_oneone_tm =
+     mk_foralls [av ''a'', lv ''l'', av ''b'', lv ''m'']
+       (safe_mk_eq (safe_mk_eq (mk_cons (av ''a'') (lv ''l'')) (mk_cons (av ''b'') (lv ''m'')))
+                   (mk_conj (safe_mk_eq (av ''a'') (av ''b'')) (safe_mk_eq (lv ''l'') (lv ''m''))))"
+
+definition list_acc_tm :: hterm where
+  "list_acc_tm =
+     mk_conj (mk_foralls [av ''a'', lv ''l''] (safe_mk_eq (Comb hd_c (mk_cons (av ''a'') (lv ''l''))) (av ''a'')))
+             (mk_foralls [av ''a'', lv ''l''] (safe_mk_eq (Comb tl_c (mk_cons (av ''a'') (lv ''l''))) (lv ''l'')))"
+
+definition list_append_tm :: hterm where
+  "list_append_tm =
+     mk_conj (mk_forall (lv ''l'') (safe_mk_eq (mk_append nil_c (lv ''l'')) (lv ''l'')))
+             (mk_foralls [av ''a'', lv ''l1'', lv ''l2'']
+                (safe_mk_eq (mk_append (mk_cons (av ''a'') (lv ''l1'')) (lv ''l2''))
+                            (mk_cons (av ''a'') (mk_append (lv ''l1'') (lv ''l2'')))))"
+
+definition list_rev_tm :: hterm where
+  "list_rev_tm =
+     mk_conj (safe_mk_eq (mk_rev nil_c) nil_c)
+             (mk_foralls [av ''a'', lv ''l'']
+                (safe_mk_eq (mk_rev (mk_cons (av ''a'') (lv ''l'')))
+                            (mk_append (mk_rev (lv ''l'')) (mk_cons (av ''a'') nil_c))))"
+
+definition list_len_tm :: hterm where
+  "list_len_tm =
+     mk_conj (safe_mk_eq (mk_len nil_c) zero_c)
+             (mk_foralls [av ''a'', lv ''l''] (safe_mk_eq (mk_len (mk_cons (av ''a'') (lv ''l''))) (mk_suc (mk_len (lv ''l'')))))"
+
+definition list_init :: "(kstate \<times> hthm list) option" where
+  "list_init =
+     do { (k0, _) \<leftarrow> peano_init;
+          k1 \<leftarrow> new_type k0 (''list'', 1);
+          k2 \<leftarrow> new_constant k1 (''NIL'', lty);
+          k3 \<leftarrow> new_constant k2 (''CONS'', fun_ty aty (fun_ty lty lty));
+          k4 \<leftarrow> new_constant k3 (''HD'', fun_ty lty aty);
+          k5 \<leftarrow> new_constant k4 (''TL'', fun_ty lty lty);
+          k6 \<leftarrow> new_constant k5 (''APPEND'', fun_ty lty (fun_ty lty lty));
+          k7 \<leftarrow> new_constant k6 (''REVERSE'', fun_ty lty lty);
+          k8 \<leftarrow> new_constant k7 (''LENGTH'', fun_ty lty num_ty);
+          (k9, t1) \<leftarrow> new_axiom k8 list_ind_tm;
+          (k10, t2) \<leftarrow> new_axiom k9 list_distinct_tm;
+          (k11, t3) \<leftarrow> new_axiom k10 list_oneone_tm;
+          (k12, t4) \<leftarrow> new_axiom k11 list_acc_tm;
+          (k13, t5) \<leftarrow> new_axiom k12 list_append_tm;
+          (k14, t6) \<leftarrow> new_axiom k13 list_rev_tm;
+          (k15, t7) \<leftarrow> new_axiom k14 list_len_tm;
+          Some (k15, [t1, t2, t3, t4, t5, t6, t7]) }"
+
+definition list_thm :: "nat \<Rightarrow> hthm" where "list_thm i = snd (the list_init) ! i"
+
+definition list_shell :: shell where
+  "list_shell =
+     \<lparr> sh_name = ''list'', sh_ty = lty, sh_bottoms = [nil_c], sh_cons = [cons_c],
+       sh_accs = [hd_c, tl_c], sh_type_axiom = None, sh_induct = list_thm 0, sh_cases = None,
+       sh_distinct = [list_thm 1], sh_oneone = [list_thm 2], sh_accdefs = [list_thm 3] \<rparr>"
+
+definition list_rules :: "hthm list" where
+  "list_rules = mk_rewrites_l (sh_distinct list_shell @ sh_oneone list_shell @ sh_accdefs list_shell
+                               @ [list_thm 4, list_thm 5, list_thm 6])"
+
+definition list_ctx :: "heur list \<Rightarrow> wctx" where
+  "list_ctx order =
+     \<lparr> w_shells = [nat_shell, list_shell], w_rules = nat_rules @ list_rules, w_glemmas = [],
+       w_order = order, w_maxdepth = 12, w_ncex = 5, w_rwfuel = 200 \<rparr>"
+
+
+section \<open>Examples\<close>
+
+text \<open>Every example below is checked by evaluation: the waterfall returns a kernel theorem
+  without hypotheses whose conclusion is the goal.  Names follow the paper's evaluation
+  (Table 3): the numbers of steps, inductions and generalizations are recorded in the state.\<close>
+
+definition proves :: "wctx \<Rightarrow> nat \<Rightarrow> hterm \<Rightarrow> bool" where
+  "proves cx fuel goal =
+     (case bm_prove cx fuel goal of
+        (Some th, _) \<Rightarrow> hyp th = [] \<and> aconv (concl th) goal
+      | (None, _) \<Rightarrow> False)"
+
+definition vm :: hterm where "vm = nm ''m''"
+definition vn :: hterm where "vn = nm ''n''"
+definition vk :: hterm where "vk = nm ''p''"
+
+definition g_add_zero :: hterm where
+  "g_add_zero = mk_forall vm (safe_mk_eq (mk_add vm zero_c) vm)"
+definition g_add_assoc :: hterm where
+  "g_add_assoc = mk_foralls [vm, vn, vk] (safe_mk_eq (mk_add vm (mk_add vn vk)) (mk_add (mk_add vm vn) vk))"
+definition g_suc_add_one :: hterm where
+  "g_suc_add_one = mk_forall vm (safe_mk_eq (mk_suc vm) (mk_add vm (mk_suc zero_c)))"
+definition g_add_suc :: hterm where
+  "g_add_suc = mk_foralls [vm, vn] (safe_mk_eq (mk_add vm (mk_suc vn)) (mk_suc (mk_add vm vn)))"
+definition g_add_comm :: hterm where
+  "g_add_comm = mk_foralls [vm, vn] (safe_mk_eq (mk_add vm vn) (mk_add vn vm))"
+definition g_mul_zero :: hterm where
+  "g_mul_zero = mk_forall vm (safe_mk_eq (mk_mul vm zero_c) zero_c)"
+definition g_mul_comm :: hterm where
+  "g_mul_comm = mk_foralls [vm, vn] (safe_mk_eq (mk_mul vm vn) (mk_mul vn vm))"
+definition g_distrib :: hterm where
+  "g_distrib = mk_foralls [vm, vn, vk]
+      (safe_mk_eq (mk_mul vm (mk_add vn vk)) (mk_add (mk_mul vm vn) (mk_mul vm vk)))"
+definition g_mul_assoc :: hterm where
+  "g_mul_assoc = mk_foralls [vm, vn, vk]
+      (safe_mk_eq (mk_mul (mk_mul vm vn) vk) (mk_mul vm (mk_mul vn vk)))"
+definition g_add_cancel :: hterm where
+  "g_add_cancel = mk_foralls [vm, vn, vk]
+      (safe_mk_eq (safe_mk_eq (mk_add vm vn) (mk_add vm vk)) (safe_mk_eq vn vk))"
+definition g_le_suc_lt :: hterm where
+  "g_le_suc_lt = mk_foralls [vm, vn] (safe_mk_eq (mk_le (mk_suc vm) vn) (mk_lt vm vn))"
+definition g_lt_suc_le :: hterm where
+  "g_lt_suc_le = mk_foralls [vm, vn] (safe_mk_eq (mk_lt vm (mk_suc vn)) (mk_le vm vn))"
+definition g_le_lt_eq :: hterm where
+  "g_le_lt_eq = mk_foralls [vm, vn]
+      (safe_mk_eq (mk_le vm vn) (mk_disj (mk_lt vm vn) (safe_mk_eq vm vn)))"
+
+definition g_len_rev :: hterm where
+  "g_len_rev = mk_forall (lv ''x'') (safe_mk_eq (mk_len (mk_rev (lv ''x''))) (mk_len (lv ''x'')))"
+definition g_rev_rev :: hterm where
+  "g_rev_rev = mk_forall (lv ''x'') (safe_mk_eq (mk_rev (mk_rev (lv ''x''))) (lv ''x''))"
+definition g_len_append :: hterm where
+  "g_len_append = mk_foralls [lv ''x'', lv ''y'']
+      (safe_mk_eq (mk_len (mk_append (lv ''x'') (lv ''y''))) (mk_add (mk_len (lv ''x'')) (mk_len (lv ''y''))))"
+definition g_append_assoc :: hterm where
+  "g_append_assoc = mk_foralls [lv ''x'', lv ''y'', lv ''z'']
+      (safe_mk_eq (mk_append (lv ''x'') (mk_append (lv ''y'') (lv ''z'')))
+                  (mk_append (mk_append (lv ''x'') (lv ''y'')) (lv ''z'')))"
+definition g_append_nil :: hterm where
+  "g_append_nil = mk_forall (lv ''x'') (safe_mk_eq (mk_append (lv ''x'') nil_c) (lv ''x''))"
+
+lemma examples_BME:
+  "proves (nat_ctx bme_order) 40 g_add_zero
+   \<and> proves (nat_ctx bme_order) 40 g_add_assoc
+   \<and> proves (nat_ctx bme_order) 40 g_suc_add_one
+   \<and> proves (nat_ctx bme_order) 40 g_add_suc
+   \<and> proves (nat_ctx bme_order) 40 g_add_comm
+   \<and> proves (nat_ctx bme_order) 40 g_mul_zero
+   \<and> proves (nat_ctx bme_order) 40 g_mul_comm
+   \<and> proves (nat_ctx bme_order) 40 g_distrib
+   \<and> proves (nat_ctx bme_order) 40 g_add_cancel
+   \<and> proves (nat_ctx bme_order) 40 g_le_suc_lt
+   \<and> proves (nat_ctx bme_order) 40 g_lt_suc_le
+   \<and> proves (nat_ctx bme_order) 40 g_le_lt_eq
+   \<and> proves (list_ctx bme_order) 40 g_len_rev
+   \<and> proves (list_ctx bme_order) 40 g_rev_rev
+   \<and> proves (list_ctx bme_order) 40 g_len_append
+   \<and> proves (list_ctx bme_order) 40 g_append_assoc
+   \<and> proves (list_ctx bme_order) 40 g_append_nil"
+  by eval
+
+text \<open>The extended system with Aderhold's generalization and generalization of variables apart
+  additionally proves associativity of multiplication.\<close>
+
+lemma examples_BMF:
+  "proves (nat_ctx bmf_order) 40 g_mul_assoc
+   \<and> proves (nat_ctx bmf_order) 40 g_mul_comm
+   \<and> proves (list_ctx bmf_order) 40 g_rev_rev"
+  by eval
 
 end

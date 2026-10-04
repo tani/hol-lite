@@ -859,7 +859,11 @@ definition simp_bool_rule_tms :: "hterm list" where
        safe_mk_eq (mk_disj T_tm ptm) T_tm,
        safe_mk_eq (mk_disj ptm T_tm) T_tm,
        safe_mk_eq (mk_disj F_tm ptm) ptm,
-       safe_mk_eq (mk_disj ptm F_tm) ptm ]"
+       safe_mk_eq (mk_disj ptm F_tm) ptm,
+       safe_mk_eq (mk_conj T_tm ptm) ptm,
+       safe_mk_eq (mk_conj ptm T_tm) ptm,
+       safe_mk_eq (mk_conj F_tm ptm) F_tm,
+       safe_mk_eq (mk_conj ptm F_tm) F_tm ]"
 
 definition eq_refl_thm :: hthm where
   "eq_refl_thm = EQT_INTRO (REFL (Var ''x'' aty))"
