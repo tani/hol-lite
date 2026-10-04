@@ -1,4 +1,5 @@
-session "Waterfall" = HOL +
+session "HOL-Lite" = HOL +
   options [document = false]
   theories
-    Waterfall
+    HOL_Lite_Kernel
+    HOL_Lite_Waterfall
