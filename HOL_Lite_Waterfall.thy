@@ -259,8 +259,8 @@ text \<open>Given the clause @{text tm}, the literal @{text l} (a negated equati
   turns a theorem of the rewritten rest into a theorem of the clause.\<close>
 
 definition rewrite_rest ::
-  "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> (hterm list \<times> (hthm list \<Rightarrow> hthm option)) option" where
-  "rewrite_rest tm l e swap keep_lit =
+  "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> (hterm list \<times> (hthm list \<Rightarrow> hthm option)) option" where
+  "rewrite_rest tm l e swap keep_lit need_change =
      (let ls = disjuncts tm; rest_ls = remove_first l ls in
       if rest_ls = [] then None
       else
@@ -268,7 +268,8 @@ definition rewrite_rest ::
         do { th_o \<leftarrow> orient swap e;
              eqr \<leftarrow> replace_conv th_o rest;
              rest' \<leftarrow> rhs eqr;
-             (let goal = (if keep_lit then mk_disj l rest' else rest') in
+             (if need_change \<and> aconv rest rest' then None else
+              let goal = (if keep_lit then mk_disj l rest' else rest') in
               Some ([goal],
                     (\<lambda>ths.
                       case ths of
@@ -298,7 +299,7 @@ definition h_subst :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
                               else if is_var y \<and> y \<notin> set (frees x) then Some (l, e, True)
                               else None)
                          | None \<Rightarrow> None) ls;
-          tries = List.map_filter (\<lambda>(l, e, sw). rewrite_rest tm l e sw False) cands
+          tries = List.map_filter (\<lambda>(l, e, sw). rewrite_rest tm l e sw False False) cands
       in case tries of
            [] \<Rightarrow> HFail
          | (gs, j) # _ \<Rightarrow> HSub gs j)"
@@ -317,7 +318,7 @@ definition h_equal :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
                          | None \<Rightarrow> None) ls);
           tries = List.map_filter
                     (\<lambda>(l, e, sw).
-                       (case rewrite_rest tm l e sw (\<not> ind) of
+                       (case rewrite_rest tm l e sw (\<not> ind) True of
                           Some (gs, j) \<Rightarrow>
                             (case gs of
                                [g] \<Rightarrow> (if aconv g tm then None else Some (gs, j))
@@ -378,7 +379,7 @@ definition merge_parts :: "(hterm list \<times> hterm list) list \<Rightarrow> (
 definition lit_is_var_app :: "hterm \<Rightarrow> bool" where
   "lit_is_var_app l =
      (case strip_comb (lit_atom l) of
-        (Const n _, args) \<Rightarrow> n \<notin> set logical_names \<and> args \<noteq> [] \<and> list_all is_var args
+        (Const n _, args) \<Rightarrow> n \<notin> set logical_names \<and> args \<noteq> [] \<and> list_all is_var args \<and> distinct args
       | _ \<Rightarrow> False)"
 
 definition h_irrel :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
@@ -388,7 +389,7 @@ definition h_irrel :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
           shell_names = concat (map (\<lambda>sh. shell_con_names sh @ shell_acc_names sh) shs) @ logical_names;
           parts = merge_parts (map (\<lambda>l. ([l], frees l)) ls);
           irrelevant = (\<lambda>p. list_all (\<lambda>l. list_all (\<lambda>n. n \<in> set shell_names) (consts_of l)) (fst p)
-                            \<or> list_ex lit_is_var_app (fst p));
+                            \<or> (length (fst p) = 1 \<and> list_ex lit_is_var_app (fst p)));
           keep = filter (\<lambda>p. \<not> irrelevant p) parts
       in if length keep = length parts then HFail
          else if keep = [] then HDisproved
@@ -612,6 +613,13 @@ definition h_gen :: "bool \<Rightarrow> wctx \<Rightarrow> bool \<Rightarrow> ht
 
 section \<open>Generalizing variables apart (4.4.2)\<close>
 
+primrec vars_ord :: "hterm \<Rightarrow> hterm list" where
+  "vars_ord (Var n ty) = [Var n ty]"
+| "vars_ord (Const n ty) = []"
+| "vars_ord (Comb s t) = vars_ord s @ vars_ord t"
+| "vars_ord (Abs v b) = filter (\<lambda>x. x \<noteq> v) (vars_ord b)"
+
+
 definition rec_positions :: "hthm list \<Rightarrow> shell list \<Rightarrow> (string \<times> nat list) list" where
   "rec_positions rules shs =
      (let rs = List.map_filter (\<lambda>th. case strip_conds (concl th) of (_, e) \<Rightarrow> map_option fst (dest_eq e)) rules
@@ -685,8 +693,23 @@ definition h_apart :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow>
                                                   if (li, ri) = (l2, r2) then replace_path q2 v' (if (li, ri) = (l1, r1) then r1' else r) else r1')
                                   [0..<length (lit_roots l)])
                   ; ls' = map (\<lambda>(li, l). lit_with_roots l (roots_new li l)) (zip [0..<length ls] ls);
-                  goal = mk_clause ls'
-              in case unsafe_to_generalize cx goal st of
+                  goal = mk_clause ls';
+                  cnt = (\<lambda>t. length (filter (\<lambda>u. u = v) (vars_ord t)));
+                  side_ok = (\<lambda>bef aft.
+                               aft = v' \<or> (let nb = cnt bef; na = cnt aft in na < nb \<and> 1 \<le> na));
+                  lit_ok = (\<lambda>li l. (case dest_eq (lit_atom l) of
+                                      None \<Rightarrow> True
+                                    | Some _ \<Rightarrow>
+                                        list_all (\<lambda>ri. side_ok (lit_roots l ! ri) (roots_new li l ! ri))
+                                                 (filter (\<lambda>ri. roots_new li l ! ri \<noteq> lit_roots l ! ri)
+                                                         [0..<length (lit_roots l)]))
+                                   \<and> (case dest_eq (lit_atom l) of
+                                        None \<Rightarrow> True
+                                      | Some _ \<Rightarrow> (let ch = filter (\<lambda>ri. roots_new li l ! ri \<noteq> lit_roots l ! ri) [0..<length (lit_roots l)]
+                                                  in ch = [] \<or> length ch = length (lit_roots l))));
+                  useful = list_all (\<lambda>(li, l). lit_ok li l) (zip [0..<length ls] ls)
+              in if \<not> useful then (HFail, st) else
+                 case unsafe_to_generalize cx goal st of
                    (True, st1) \<Rightarrow> (HFail, st1\<lparr> w_overs := w_overs st1 + 1 \<rparr>)
                  | (False, st1) \<Rightarrow>
                      (HSub [goal] (\<lambda>ths. case ths of
@@ -704,18 +727,17 @@ definition shell_for_var :: "shell list \<Rightarrow> hterm \<Rightarrow> (shell
         [] \<Rightarrow> None
       | r # _ \<Rightarrow> Some r)"
 
+definition lit_app_roots :: "hterm \<Rightarrow> hterm list" where
+  "lit_app_roots l =
+     (let a = lit_atom l in
+      case dest_eq a of Some (x, y) \<Rightarrow> [x, y] | None \<Rightarrow> [a])"
+
 definition ind_score :: "(string \<times> nat list) list \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> nat" where
   "ind_score rp ls v =
      length (filter (\<lambda>(p, f, args). case map_of rp f of
                                       None \<Rightarrow> False
                                     | Some rps \<Rightarrow> list_ex (\<lambda>i. i < length args \<and> args ! i = v) rps)
-                    (concat (map (\<lambda>r. apps_n (tm_size r) [] r) (concat (map lit_roots ls)))))"
-
-primrec vars_ord :: "hterm \<Rightarrow> hterm list" where
-  "vars_ord (Var n ty) = [Var n ty]"
-| "vars_ord (Const n ty) = []"
-| "vars_ord (Comb s t) = vars_ord s @ vars_ord t"
-| "vars_ord (Abs v b) = filter (\<lambda>x. x \<noteq> v) (vars_ord b)"
+                    (concat (map (\<lambda>r. apps_n (tm_size r) [] r) (concat (map lit_app_roots ls)))))"
 
 definition choose_ind_var :: "wctx \<Rightarrow> hterm \<Rightarrow> hterm option" where
   "choose_ind_var cx tm =
@@ -878,12 +900,33 @@ definition pre_c :: hterm where "pre_c = Const ''PRE'' num1"
 definition add_c :: hterm where "add_c = Const ''+'' num2"
 definition mul_c :: hterm where "mul_c = Const ''*'' num2"
 
+definition numb2 :: "hol_type" where "numb2 = fun_ty num_ty (fun_ty num_ty bool_ty)"
+definition le_c :: hterm where "le_c = Const ''<='' numb2"
+definition lt_c :: hterm where "lt_c = Const ''<'' numb2"
+
 definition mk_suc :: "hterm \<Rightarrow> hterm" where "mk_suc t = Comb suc_c t"
 definition mk_pre :: "hterm \<Rightarrow> hterm" where "mk_pre t = Comb pre_c t"
 definition mk_add :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_add a b = Comb (Comb add_c a) b"
 definition mk_mul :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_mul a b = Comb (Comb mul_c a) b"
 
 definition nm :: "string \<Rightarrow> hterm" where "nm s = Var s num_ty"
+
+definition mk_le :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_le a b = Comb (Comb le_c a) b"
+definition mk_lt :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_lt a b = Comb (Comb lt_c a) b"
+
+definition le_ax_tm :: hterm where
+  "le_ax_tm =
+     mk_conj (mk_forall (nm ''m'') (safe_mk_eq (mk_le (nm ''m'') zero_c) (safe_mk_eq (nm ''m'') zero_c)))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_le (nm ''m'') (mk_suc (nm ''n'')))
+                            (mk_disj (safe_mk_eq (nm ''m'') (mk_suc (nm ''n''))) (mk_le (nm ''m'') (nm ''n''))))))"
+
+definition lt_ax_tm :: hterm where
+  "lt_ax_tm =
+     mk_conj (mk_forall (nm ''m'') (safe_mk_eq (mk_lt (nm ''m'') zero_c) F_tm))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_lt (nm ''m'') (mk_suc (nm ''n'')))
+                            (mk_disj (safe_mk_eq (nm ''m'') (nm ''n'')) (mk_lt (nm ''m'') (nm ''n''))))))"
 
 definition ind_ax_tm :: hterm where
   "ind_ax_tm =
@@ -927,14 +970,18 @@ definition peano_init :: "(kstate \<times> hthm list) option" where
           k3 \<leftarrow> new_constant k2 (''SUC'', num1);
           k4 \<leftarrow> new_constant k3 (''PRE'', num1);
           k5 \<leftarrow> new_constant k4 (''+'', num2);
-          k6 \<leftarrow> new_constant k5 (''*'', num2);
+          k6a \<leftarrow> new_constant k5 (''*'', num2);
+          k6b \<leftarrow> new_constant k6a (''<='', numb2);
+          k6 \<leftarrow> new_constant k6b (''<'', numb2);
           (k7, t1) \<leftarrow> new_axiom k6 ind_ax_tm;
           (k8, t2) \<leftarrow> new_axiom k7 distinct_ax_tm;
           (k9, t3) \<leftarrow> new_axiom k8 oneone_ax_tm;
           (k10, t4) \<leftarrow> new_axiom k9 pre_ax_tm;
           (k11, t5) \<leftarrow> new_axiom k10 add_ax_tm;
           (k12, t6) \<leftarrow> new_axiom k11 mul_ax_tm;
-          Some (k12, [t1, t2, t3, t4, t5, t6]) }"
+          (k13, t7) \<leftarrow> new_axiom k12 le_ax_tm;
+          (k14, t8) \<leftarrow> new_axiom k13 lt_ax_tm;
+          Some (k14, [t1, t2, t3, t4, t5, t6, t7, t8]) }"
 
 definition peano_thm :: "nat \<Rightarrow> hthm" where "peano_thm i = snd (the peano_init) ! i"
 
@@ -946,7 +993,7 @@ definition nat_shell :: shell where
 
 definition nat_rules :: "hthm list" where
   "nat_rules = mk_rewrites_l (sh_distinct nat_shell @ sh_oneone nat_shell @ sh_accdefs nat_shell
-                              @ [peano_thm 4, peano_thm 5])"
+                              @ [peano_thm 4, peano_thm 5, peano_thm 6, peano_thm 7])"
 
 definition nat_ctx :: "heur list \<Rightarrow> wctx" where
   "nat_ctx order =
