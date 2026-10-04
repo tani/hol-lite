@@ -5,4 +5,3 @@ session "HOL-Lite" = HOL +
   theories
     HOL_Lite_Kernel
     HOL_Lite_Bool
-    HOL_Lite_Waterfall

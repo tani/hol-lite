@@ -1,5 +1,5 @@
 theory HOL_Lite_Kernel
-  imports Main "HOL-Library.Code_Target_Nat"
+  imports Main "HOL-Library.Code_Target_Nat" "HOL-Library.Monad_Syntax"
 begin
 
 text \<open>
@@ -13,8 +13,11 @@ text \<open>
   the kernel functions of this file; the rest of the development constructs theorems
   exclusively through them, as in an LCF-style prover.
 
-  Two places where OCaml relies on non-structural recursion (@{text variant} and the
-  capture-avoiding retry in @{text inst}) are given an explicit, generous fuel bound.
+  The two places where OCaml relies on non-structural recursion are ported without fuel:
+  @{text variant} is a total function whose termination is proved (the name grows by one
+  prime per step while all names occurring in the avoided terms have bounded length), and
+  the capture-avoiding retry in @{text inst} is a @{text partial_function} into @{typ "'a option"},
+  where @{text None} stands for non-termination.
 \<close>
 
 section \<open>Utilities\<close>
@@ -102,6 +105,12 @@ primrec frees :: "hterm \<Rightarrow> hterm list" where
 definition freesl :: "hterm list \<Rightarrow> hterm list" where
   "freesl tml = foldr (\<lambda>t acc. List.union (frees t) acc) tml []"
 
+primrec freesin :: "hterm list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "freesin acc (Var n ty) = (Var n ty \<in> set acc)"
+| "freesin acc (Const n ty) = True"
+| "freesin acc (Comb s t) = (freesin acc s \<and> freesin acc t)"
+| "freesin acc (Abs bv bod) = freesin (bv # acc) bod"
+
 primrec vfree_in :: "hterm \<Rightarrow> hterm \<Rightarrow> bool" where
   "vfree_in v (Var n ty) = (Var n ty = v)"
 | "vfree_in v (Const n ty) = (Const n ty = v)"
@@ -115,17 +124,38 @@ primrec type_vars_in_term :: "hterm \<Rightarrow> hol_type list" where
 | "type_vars_in_term (Abs v t) = List.union (type_vars_in_term v) (type_vars_in_term t)"
 
 text \<open>@{text variant}: rename a variable by appending primes until it is not free in any
-  term of @{text avoid}.  The number of primes ever needed is bounded by the total size of
-  the avoided terms, which is used as fuel.\<close>
+  term of @{text avoid}.  Termination: every variable free in a term has a name no longer
+  than the total length of all names in that term.\<close>
 
-primrec variant_n :: "nat \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
-  "variant_n 0 avoid v = v"
-| "variant_n (Suc n) avoid v =
+primrec tm_nlen :: "hterm \<Rightarrow> nat" where
+  "tm_nlen (Var n _) = length n"
+| "tm_nlen (Const n _) = length n"
+| "tm_nlen (Comb s t) = tm_nlen s + tm_nlen t"
+| "tm_nlen (Abs v t) = tm_nlen v + tm_nlen t"
+
+lemma vfree_in_nlen: "vfree_in (Var s ty) t \<Longrightarrow> length s \<le> tm_nlen t"
+  by (induction t) auto
+
+lemma list_ex_nlen:
+  "list_ex (vfree_in (Var s ty)) avoid \<Longrightarrow> length s \<le> sum_list (map tm_nlen avoid)"
+proof (induction avoid)
+  case Nil then show ?case by simp
+next
+  case (Cons a avoid)
+  then show ?case using vfree_in_nlen[of s ty a] by auto
+qed
+
+function variant :: "hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "variant avoid v =
      (if \<not> list_ex (vfree_in v) avoid then v
-      else case v of Var s ty \<Rightarrow> variant_n n avoid (Var (s @ [CHR 0x27]) ty) | _ \<Rightarrow> v)"
+      else case v of Var s ty \<Rightarrow> variant avoid (Var (s @ [CHR 0x27]) ty) | _ \<Rightarrow> v)"
+  by pat_completeness auto
 
-definition variant :: "hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
-  "variant avoid v = variant_n (Suc (sum_list (map tm_size avoid))) avoid v"
+termination
+  apply (relation "measure (\<lambda>(avoid, v). sum_list (map tm_nlen avoid) + 1 - (case v of Var s _ \<Rightarrow> length s | _ \<Rightarrow> 0))")
+   apply simp
+  apply (auto dest: list_ex_nlen split: hterm.splits)
+  done
 
 text \<open>Capture-avoiding substitution of terms for variables; @{text ilist} holds pairs
   @{text "(replacement, variable)"}.\<close>
@@ -151,45 +181,51 @@ definition vsubst_checked :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<
       then Some (vsubst theta tm) else None)"
 
 text \<open>Type instantiation of terms.  The OCaml @{text Clash} exception is the result
-  constructor @{text IClash}.\<close>
+  constructor @{text IClash}.  The capture-avoiding retry is not structurally recursive, so
+  @{text inst_f} is a @{text partial_function}; @{text None} is non-termination.\<close>
 
-datatype instres = IOk hterm | IClash hterm | IFail
+datatype instres = IOk hterm | IClash hterm
 
-primrec inst_n :: "nat \<Rightarrow> (hterm \<times> hterm) list \<Rightarrow> (hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> instres" where
-  "inst_n 0 env tyin tm = IFail"
-| "inst_n (Suc n) env tyin tm =
+definition inst_var :: "(hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "inst_var tyin v = (case v of Var n ty \<Rightarrow> Var n (type_subst tyin ty) | _ \<Rightarrow> v)"
+
+partial_function (option) inst_f ::
+  "(hterm \<times> hterm) list \<Rightarrow> (hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> instres option" where
+  "inst_f env tyin tm =
      (case tm of
         Var nm ty \<Rightarrow>
           (let ty' = type_subst tyin ty; tm' = Var nm ty' in
-           if rev_assocd tm' env tm = tm then IOk tm' else IClash tm')
-      | Const c ty \<Rightarrow> IOk (Const c (type_subst tyin ty))
+           if rev_assocd tm' env tm = tm then Some (IOk tm') else Some (IClash tm'))
+      | Const c ty \<Rightarrow> Some (IOk (Const c (type_subst tyin ty)))
       | Comb f x \<Rightarrow>
-          (case inst_n n env tyin f of
-             IOk f' \<Rightarrow> (case inst_n n env tyin x of IOk x' \<Rightarrow> IOk (Comb f' x') | r \<Rightarrow> r)
-           | r \<Rightarrow> r)
+          do { rf \<leftarrow> inst_f env tyin f;
+               (case rf of
+                  IOk f' \<Rightarrow>
+                    do { rx \<leftarrow> inst_f env tyin x;
+                         (case rx of IOk x' \<Rightarrow> Some (IOk (Comb f' x')) | IClash w \<Rightarrow> Some (IClash w)) }
+                | IClash w \<Rightarrow> Some (IClash w)) }
       | Abs y t \<Rightarrow>
-          (case inst_n n [] tyin y of
-             IOk y' \<Rightarrow>
-               (let env' = (y, y') # env in
-                case inst_n n env' tyin t of
-                  IOk t' \<Rightarrow> IOk (Abs y' t')
-                | IFail \<Rightarrow> IFail
-                | IClash w' \<Rightarrow>
-                    if w' \<noteq> y' then IClash w'
-                    else
-                      (let ifrees = map (\<lambda>v. case inst_n n [] tyin v of IOk v' \<Rightarrow> v' | _ \<Rightarrow> v) (frees t);
-                           y'' = variant ifrees y'
-                       in case (y'', y) of
-                            (Var nm2 _, Var _ ty0) \<Rightarrow>
-                              inst_n n env tyin (Abs (Var nm2 ty0) (vsubst [(Var nm2 ty0, y)] t))
-                          | _ \<Rightarrow> IFail))
-           | r \<Rightarrow> r))"
+          (let y' = inst_var tyin y; env' = (y, y') # env in
+           do { rt \<leftarrow> inst_f env' tyin t;
+                (case rt of
+                   IOk t' \<Rightarrow> Some (IOk (Abs y' t'))
+                 | IClash w' \<Rightarrow>
+                     if w' \<noteq> y' then Some (IClash w')
+                     else
+                       (let ifrees = map (inst_var tyin) (frees t);
+                            y'' = variant ifrees y'
+                        in case (y'', y) of
+                             (Var nm2 _, Var _ ty0) \<Rightarrow>
+                               inst_f env tyin (Abs (Var nm2 ty0) (vsubst [(Var nm2 ty0, y)] t))
+                           | _ \<Rightarrow> None)) }))"
+
+declare inst_f.simps [code]
 
 definition inst :: "(hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> hterm option" where
   "inst tyin tm =
      (if tyin = [] then Some tm
-      else case inst_n (4 * (tm_size tm + 1) * (tm_size tm + 1)) [] tyin tm of
-             IOk t \<Rightarrow> Some t | _ \<Rightarrow> None)"
+      else case inst_f [] tyin tm of
+             Some (IOk t) \<Rightarrow> Some t | _ \<Rightarrow> None)"
 
 section \<open>Alpha-equivalence\<close>
 
@@ -237,9 +273,12 @@ fun term_union :: "hterm list \<Rightarrow> hterm list \<Rightarrow> hterm list"
       | CLt \<Rightarrow> h1 # term_union t1 (h2 # t2)
       | CGt \<Rightarrow> h2 # term_union (h1 # t1) t2)"
 
-fun term_image :: "(hterm \<Rightarrow> hterm) \<Rightarrow> hterm list \<Rightarrow> hterm list" where
-  "term_image f [] = []"
-| "term_image f (h # t) = term_union [f h] (term_image f t)"
+fun term_image :: "(hterm \<Rightarrow> hterm option) \<Rightarrow> hterm list \<Rightarrow> hterm list option" where
+  "term_image f [] = Some []"
+| "term_image f (h # t) =
+     (case f h of
+        None \<Rightarrow> None
+      | Some h' \<Rightarrow> (case term_image f t of None \<Rightarrow> None | Some t' \<Rightarrow> Some (term_union [h'] t')))"
 
 section \<open>Kernel state\<close>
 
@@ -339,9 +378,9 @@ fun TRANS :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm option" where
 fun MK_COMB :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm option" where
   "MK_COMB (Sequent asl1 (Comb (Comb (Const n1 _) l1) r1)) (Sequent asl2 (Comb (Comb (Const n2 _) l2) r2)) =
      (if n1 = ''='' \<and> n2 = ''=''
-      then (case dest_fun_ty (type_of l1) of
+      then (case dest_fun_ty (type_of r1) of
               Some (ty, _) \<Rightarrow>
-                if ty = type_of l2
+                if ty = type_of r2
                 then Some (Sequent (term_union asl1 asl2) (safe_mk_eq (Comb l1 l2) (Comb r1 r2)))
                 else None
             | None \<Rightarrow> None)
@@ -374,20 +413,14 @@ fun DEDUCT_ANTISYM_RULE :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm" where
 
 fun INST_TYPE :: "(hol_type \<times> hol_type) list \<Rightarrow> hthm \<Rightarrow> hthm option" where
   "INST_TYPE theta (Sequent asl c) =
-     (case those (map (inst theta) asl) of
-        Some asl' \<Rightarrow>
-          (case inst theta c of
-             Some c' \<Rightarrow> Some (Sequent (fold (\<lambda>h acc. term_union [h] acc) (rev asl') []) c')
-           | None \<Rightarrow> None)
+     (case term_image (inst theta) asl of
+        Some asl' \<Rightarrow> (case inst theta c of Some c' \<Rightarrow> Some (Sequent asl' c') | None \<Rightarrow> None)
       | None \<Rightarrow> None)"
 
 fun INST :: "(hterm \<times> hterm) list \<Rightarrow> hthm \<Rightarrow> hthm option" where
   "INST theta (Sequent asl c) =
-     (case vsubst_checked theta c of
-        Some c' \<Rightarrow>
-          (case those (map (vsubst_checked theta) asl) of
-             Some asl' \<Rightarrow> Some (Sequent (fold (\<lambda>h acc. term_union [h] acc) (rev asl') []) c')
-           | None \<Rightarrow> None)
+     (case term_image (vsubst_checked theta) asl of
+        Some asl' \<Rightarrow> (case vsubst_checked theta c of Some c' \<Rightarrow> Some (Sequent asl' c') | None \<Rightarrow> None)
       | None \<Rightarrow> None)"
 
 section \<open>Extension principles\<close>
@@ -403,7 +436,7 @@ definition new_basic_definition :: "kstate \<Rightarrow> hterm \<Rightarrow> (ks
      (case tm of
         Comb (Comb (Const eq _) (Var cname ty)) r \<Rightarrow>
           if eq \<noteq> ''='' then None
-          else if frees r \<noteq> [] then None
+          else if \<not> freesin [] r then None
           else if \<not> set (type_vars_in_term r) \<subseteq> set (tyvars ty) then None
           else
             (case new_constant ks (cname, ty) of
@@ -429,7 +462,7 @@ definition new_basic_type_definition ::
         else
           (case c of
              Comb P x \<Rightarrow>
-               if frees P \<noteq> [] then None
+               if \<not> freesin [] P then None
                else
                  (let tvs = isort (type_vars_in_term P) in
                   case new_type ks (tyname, length tvs) of
