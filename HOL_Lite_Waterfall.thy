@@ -585,21 +585,16 @@ definition twice_on_a_side :: "hterm \<Rightarrow> hterm list \<Rightarrow> bool
                     Some (x, y) \<Rightarrow> occ_count g (subs x) \<ge> 2 \<or> occ_count g (subs y) \<ge> 2
                   | None \<Rightarrow> False) ls"
 
-text \<open>Candidates by the common subterm criterion: a generalizable term is a candidate if it
+text \<open>Boyer-Moore generalization (3.3.5): a generalizable term is a candidate if it
   appears in more than one generalizable subterm, or on both sides of an equation or negated
-  equation.  Aderhold's variant additionally requires the equation criterion for terms of
-  equations.  Minimal candidates have no other candidate as a proper subterm.\<close>
+  equation.  The minimal candidates (those having no other candidate as a proper subterm) are
+  all generalized simultaneously.\<close>
 
-definition gen_cands :: "wctx \<Rightarrow> bool \<Rightarrow> hterm list \<Rightarrow> hterm list" where
-  "gen_cands cx ad ls =
-     (let gts = gen_terms cx ad ls;
-          cs0 = filter (\<lambda>g. count_in g gts \<ge> 2 \<or> on_both_sides g ls) (dedup_aconv gts);
-          cs1 = (if ad then filter (\<lambda>g. on_both_sides g ls \<or> twice_on_a_side g ls
-                                        \<or> \<not> list_ex (\<lambda>l. case dest_eq (lit_atom l) of
-                                                           Some (x, y) \<Rightarrow> g \<in> set (subs x) \<or> g \<in> set (subs y)
-                                                         | None \<Rightarrow> False) ls) cs0
-                 else cs0)
-      in filter (\<lambda>c. \<not> list_ex (\<lambda>c'. \<not> aconv c c' \<and> c' \<in> set (tl (subs c))) cs1) cs1)"
+definition gen_cands :: "wctx \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "gen_cands cx ls =
+     (let gts = gen_terms cx False ls;
+          cs = filter (\<lambda>g. count_in g gts \<ge> 2 \<or> on_both_sides g ls) (dedup_aconv gts)
+      in filter (\<lambda>c. \<not> list_ex (\<lambda>c'. \<not> aconv c c' \<and> c' \<in> set (tl (subs c))) cs) cs)"
 
 primrec rep_tm :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> hterm" where
   "rep_tm a b (Var n ty) = (if Var n ty = a then b else Var n ty)"
@@ -656,25 +651,6 @@ definition gen_goal_and_just ::
                                th2 \<leftarrow> elim_lemmas lems th1;
                                if aconv (concl th2) tm then Some th2 else None }
                  | _ \<Rightarrow> None)))"
-
-definition h_gen :: "bool \<Rightarrow> wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hres \<times> wst" where
-  "h_gen ad cx ind tm st =
-     (let ls = disjuncts tm;
-          cands = filter (\<lambda>g. \<not> list_ex (aconv g) (w_gened st)) (gen_cands cx ad ls);
-          sel = (if ad
-                 then (case cands of
-                         [] \<Rightarrow> []
-                       | c # cs \<Rightarrow> [foldl (\<lambda>b g. if count_in g (gen_terms cx ad ls) > count_in b (gen_terms cx ad ls) then g else b) c cs])
-                 else cands)
-      in if sel = [] then (HFail, st)
-         else
-           (let pairs = fresh_vars (frees tm) sel;
-                (goal, just) = gen_goal_and_just cx tm pairs
-            in case unsafe_to_generalize cx goal st of
-                 (True, st1) \<Rightarrow> (HFail, st1\<lparr> w_overs := w_overs st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)
-               | (False, st1) \<Rightarrow>
-                   (HSub [goal] just,
-                    st1\<lparr> w_gens := w_gens st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)))"
 
 section \<open>Generalizing variables apart (4.4.2)\<close>
 
@@ -803,6 +779,115 @@ definition ind_score :: "(string \<times> nat list) list \<Rightarrow> hterm lis
                                       None \<Rightarrow> False
                                     | Some rps \<Rightarrow> list_ex (\<lambda>i. i < length args \<and> args ! i = v) rps)
                     (concat (map (\<lambda>r. apps_n (tm_size r) [] r) (concat (map lit_app_roots ls)))))"
+
+section \<open>Aderhold's common subterm generalization (4.4.1)\<close>
+
+text \<open>Step 1, generalizable subterms: as in Boyer-Moore (neither a variable, nor an explicit value
+  template, nor an application of accessor functions) and in addition free of constructors
+  (@{text "gen_ok cx True"}).
+
+  Step 2, proposals: sets of generalizable subterms that occur in a recursive position of a
+  function, or that form one of the sides of an equation.  A proposal is suitable for the clause
+  if each of its terms occurs at least twice in it and satisfies the equation criterion: in every
+  equation in which it occurs it occurs on both sides, or at least twice on one side.
+
+  Step 3, evaluation: the proposals are ordered by the induction test (induction is possible on
+  each generalized variable), by how often they were proposed, and by the number of occurrences
+  of their terms; only the single best proposal is applied.  Terms that were generalized before
+  are not proposed again, and the counterexample checker rejects over-generalizations in
+  @{text h_gen}.\<close>
+
+definition eq_crit :: "hterm \<Rightarrow> hterm list \<Rightarrow> bool" where
+  "eq_crit g ls =
+     list_all (\<lambda>l. case dest_eq (lit_atom l) of
+                     Some (x, y) \<Rightarrow> (g \<in> set (subs x) \<or> g \<in> set (subs y)) \<longrightarrow>
+                                   (g \<in> set (subs x) \<and> g \<in> set (subs y)
+                                    \<or> occ_count g (subs x) \<ge> 2 \<or> occ_count g (subs y) \<ge> 2)
+                   | None \<Rightarrow> True) ls"
+
+definition clause_nodes :: "hterm list \<Rightarrow> hterm list" where
+  "clause_nodes ls = concat (map (\<lambda>l. lit_atom l # concat (map subs (lit_roots l))) ls)"
+
+definition node_proposals :: "wctx \<Rightarrow> (string \<times> nat list) list \<Rightarrow> hterm \<Rightarrow> hterm list list" where
+  "node_proposals cx rp u =
+     (case strip_comb u of
+        (Const n _, args) \<Rightarrow>
+          (case map_of rp n of
+             Some rps \<Rightarrow>
+               (let p = dedup_aconv (filter (gen_ok cx True)
+                          (List.map_filter (\<lambda>i. if i < length args then Some (args ! i) else None) rps))
+                in if p = [] then [] else [p])
+           | None \<Rightarrow> [])
+      | _ \<Rightarrow> [])"
+
+definition side_proposals :: "wctx \<Rightarrow> hterm \<Rightarrow> hterm list list" where
+  "side_proposals cx l =
+     (case dest_eq (lit_atom l) of
+        Some (x, y) \<Rightarrow> map (\<lambda>t. [t]) (filter (gen_ok cx True) [x, y])
+      | None \<Rightarrow> [])"
+
+definition prop_eq :: "hterm list \<Rightarrow> hterm list \<Rightarrow> bool" where
+  "prop_eq p q = (length p = length q \<and> list_all (\<lambda>a. list_ex (aconv a) q) p)"
+
+fun add_prop :: "hterm list \<Rightarrow> (hterm list \<times> nat) list \<Rightarrow> (hterm list \<times> nat) list" where
+  "add_prop p [] = [(p, 1)]"
+| "add_prop p ((q, n) # r) = (if prop_eq p q then (q, n + 1) # r else (q, n) # add_prop p r)"
+
+definition proposals :: "wctx \<Rightarrow> (string \<times> nat list) list \<Rightarrow> hterm list \<Rightarrow> (hterm list \<times> nat) list" where
+  "proposals cx rp ls =
+     foldl (\<lambda>acc p. add_prop p acc) []
+       (concat (map (node_proposals cx rp) (clause_nodes ls)) @ concat (map (side_proposals cx) ls))"
+
+definition ad_suitable :: "hterm list \<Rightarrow> hterm list \<Rightarrow> bool" where
+  "ad_suitable ls p =
+     (let nodes = concat (map subs (concat (map lit_roots ls)))
+      in list_all (\<lambda>t. occ_count t nodes \<ge> 2 \<and> eq_crit t ls) p)"
+
+definition ind_possible :: "wctx \<Rightarrow> (string \<times> nat list) list \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "ind_possible cx rp ls v =
+     (shell_for_var (w_shells cx) v \<noteq> None \<and> ind_score rp ls v > 0)"
+
+definition ad_key :: "wctx \<Rightarrow> (string \<times> nat list) list \<Rightarrow> hterm \<Rightarrow> hterm list \<times> nat \<Rightarrow> nat \<times> nat \<times> nat" where
+  "ad_key cx rp tm pn =
+     (let p = fst pn;
+          pairs = fresh_vars (frees tm) p;
+          ls' = disjuncts (rep_pairs pairs tm);
+          nodes = concat (map subs (concat (map lit_roots (disjuncts tm))))
+      in ((if list_all (\<lambda>(g, v). ind_possible cx rp ls' v) pairs then 1 else 0),
+          snd pn,
+          sum_list (map (\<lambda>t. occ_count t nodes) p)))"
+
+definition key_better :: "nat \<times> nat \<times> nat \<Rightarrow> nat \<times> nat \<times> nat \<Rightarrow> bool" where
+  "key_better k1 k2 =
+     (case (k1, k2) of
+        ((a1, b1, c1), (a2, b2, c2)) \<Rightarrow> a1 > a2 \<or> (a1 = a2 \<and> (b1 > b2 \<or> (b1 = b2 \<and> c1 > c2))))"
+
+definition ad_select :: "wctx \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "ad_select cx ls tm gened =
+     (let rp = rec_positions (w_rules cx) (w_shells cx);
+          props = filter (\<lambda>pn. ad_suitable ls (fst pn)
+                               \<and> \<not> list_ex (\<lambda>t. list_ex (aconv t) gened) (fst pn))
+                         (proposals cx rp ls)
+      in case props of
+           [] \<Rightarrow> []
+         | pn # rest \<Rightarrow>
+             fst (foldl (\<lambda>b c. if key_better (ad_key cx rp tm c) (ad_key cx rp tm b) then c else b) pn rest))"
+
+definition h_gen :: "bool \<Rightarrow> wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hres \<times> wst" where
+  "h_gen ad cx ind tm st =
+     (let ls = disjuncts tm;
+          sel = (if ad then ad_select cx ls tm (w_gened st)
+                 else filter (\<lambda>g. \<not> list_ex (aconv g) (w_gened st)) (gen_cands cx ls))
+      in if sel = [] then (HFail, st)
+         else
+           (let pairs = fresh_vars (frees tm) sel;
+                (goal, just) = gen_goal_and_just cx tm pairs
+            in case unsafe_to_generalize cx goal st of
+                 (True, st1) \<Rightarrow> (HFail, st1\<lparr> w_overs := w_overs st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)
+               | (False, st1) \<Rightarrow>
+                   (HSub [goal] just,
+                    st1\<lparr> w_gens := w_gens st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)))"
+
 
 definition choose_ind_var :: "wctx \<Rightarrow> hterm \<Rightarrow> hterm option" where
   "choose_ind_var cx tm =
@@ -1023,7 +1108,7 @@ definition mul_ax_tm :: hterm where
      mk_conj (mk_forall (nm ''n'') (safe_mk_eq (mk_mul zero_c (nm ''n'')) zero_c))
              (mk_forall (nm ''m'') (mk_forall (nm ''n'')
                 (safe_mk_eq (mk_mul (mk_suc (nm ''m'')) (nm ''n''))
-                            (mk_add (nm ''n'') (mk_mul (nm ''m'') (nm ''n''))))))"
+                            (mk_add (mk_mul (nm ''m'') (nm ''n'')) (nm ''n'')))))"
 
 text \<open>Build the theory of Peano arithmetic in the kernel: one new type, five constants and the
   Peano axioms (including the defining equations of @{text "+"} and @{text "*"}).\<close>
