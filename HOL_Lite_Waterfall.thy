@@ -251,26 +251,18 @@ definition h_clausal :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarro
 
 section \<open>Tautology and setify (4.3.1, 4.3.3)\<close>
 
-definition taut_proof :: "hterm \<Rightarrow> hthm option" where
-  "taut_proof tm =
-     (let ls = disjuncts tm in
-      case find (\<lambda>l. case dest_eq l of Some (x, y) \<Rightarrow> aconv x y | None \<Rightarrow> False) ls of
-        Some l \<Rightarrow> (case dest_eq l of Some (x, _) \<Rightarrow> embed (REFL x) tm | None \<Rightarrow> None)
-      | None \<Rightarrow>
-        (if list_ex (aconv T_tm) ls then embed TRUTH tm
-         else
-           (case find (\<lambda>l. list_ex (\<lambda>m. case dest_neg m of Some a \<Rightarrow> aconv a l | None \<Rightarrow> False) ls) ls of
-              None \<Rightarrow> None
-            | Some l \<Rightarrow>
-                do { em \<leftarrow> SPEC l EXCLUDED_MIDDLE;
-                     a1 \<leftarrow> ASSUME l;
-                     a2 \<leftarrow> ASSUME (mk_not l);
-                     c1 \<leftarrow> embed a1 tm;
-                     c2 \<leftarrow> embed a2 tm;
-                     DISJ_CASES em c1 c2 })))"
+text \<open>The Tautology heuristic runs HOL Light's general propositional tautology prover
+  (@{const TAUT}: rewriting plus case splits on the boolean subterms) on the clause, so that any
+  propositional tautology over the clause's atoms is proved, not only those with a literal pair
+  @{text "p, \<not>p"}, @{text T} or @{text "x = x"}.  As the prover splits on every atom, it is only
+  attempted for clauses with at most @{text max_taut_atoms} atoms.\<close>
+
+definition max_taut_atoms :: nat where "max_taut_atoms = 12"
 
 definition h_taut :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
-  "h_taut cx ind tm = (case taut_proof tm of Some th \<Rightarrow> HProved th | None \<Rightarrow> HFail)"
+  "h_taut cx ind tm =
+     (if length (bool_atoms tm) > max_taut_atoms then HFail
+      else case TAUT tm of Some th \<Rightarrow> HProved th | None \<Rightarrow> HFail)"
 
 fun dedup_aconv :: "hterm list \<Rightarrow> hterm list" where
   "dedup_aconv [] = []"
@@ -1336,6 +1328,16 @@ lemma examples_BMF:
   "proves (nat_ctx bmf_order) 40 g_mul_assoc
    \<and> proves (nat_ctx bmf_order) 40 g_mul_comm
    \<and> proves (list_ctx bmf_order) 40 g_rev_rev"
+  by eval
+
+text \<open>The Tautology heuristic proves general propositional tautologies, e.g.
+  @{text "(x \<or> y) \<or> (\<not>x \<and> \<not>y)"}, which has no complementary literal pair.\<close>
+
+lemma taut_heuristic_example:
+  "(case h_taut (nat_ctx bmf_order) False
+          (mk_disj (mk_disj (Var ''x'' bool_ty) (Var ''y'' bool_ty))
+                   (mk_conj (mk_neg (Var ''x'' bool_ty)) (mk_neg (Var ''y'' bool_ty)))) of
+      HProved th \<Rightarrow> hyp th = [] | _ \<Rightarrow> False)"
   by eval
 
 end

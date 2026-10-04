@@ -61,7 +61,7 @@ exists); `STRUCT_CASES_THEN` is size-bounded rather than a `REPEAT_TCL`.
 | 3.3.5 Generalization (minimal common subterms, generalization lemmas) | `h_gen False` |
 | 3.3.6 Irrelevance | `h_irrel` |
 | 4.2.2 Loop elimination | warehouse filter (`run_pipe`), induction filter, maximum term depth |
-| 4.3 Tautology and Setify heuristics | `h_taut`, `h_setify` |
+| 4.3 Tautology and Setify heuristics | `h_taut` (runs the ported general `TAUT` on the clause, up to 12 atoms), `h_setify` |
 | 4.4.1 Aderhold's common subterm generalization | `h_gen True`: generalizable terms exclude constructors; proposals from recursive argument positions and equation sides (`node_proposals`, `side_proposals`); suitability (≥ 2 occurrences, equation criterion); ranking by induction test, times proposed, occurrences (`ad_key`); only the best proposal is applied; generalized terms are remembered; counterexample filter |
 | 4.4.2 Generalizing variables apart | `h_apart` |
 | 4.4.3 Counterexample checker | `cex_check` (random ground instances, evaluated by `REWRITE_CONV`; undecidable instances are rejected) |
