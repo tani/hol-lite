@@ -1,186 +1,454 @@
 theory HOL_Lite_Kernel
-  imports Main
+  imports Main "HOL-Library.Code_Target_Nat"
 begin
 
 text \<open>
-  Kernel for the Boyer-Moore waterfall (cf. "The Boyer-Moore Waterfall Model Revisited",
-  arXiv:1808.03810): terms of a small natural-number shell, clauses (disjunctions of
-  possibly negated equations), their semantics and validity, substitution, replacement,
-  and the notion of a sound process outcome.
+  A port of HOL Light's logical kernel (@{text fusion.ml}) to Isabelle/HOL.
+
+  Types, terms, theorems and the ten primitive inference rules of HOL Light are
+  reproduced function by function.  OCaml's exceptions become @{typ "'a option"}, and
+  OCaml's global references (@{text the_type_constants}, @{text the_term_constants},
+  @{text the_axioms}, @{text the_definitions}) are threaded explicitly through a
+  @{text kstate} record.  Theorems are values @{text "Sequent hyps concl"} built only by
+  the kernel functions of this file; the rest of the development constructs theorems
+  exclusively through them, as in an LCF-style prover.
+
+  Two places where OCaml relies on non-structural recursion (@{text variant} and the
+  capture-avoiding retry in @{text inst}) are given an explicit, generous fuel bound.
 \<close>
 
-section \<open>Terms, clauses and semantics\<close>
+section \<open>Utilities\<close>
 
-datatype trm = TV nat | TZ | TS trm | TP trm trm | TM trm trm
+datatype cmp = CLt | CEq | CGt
 
-type_synonym lit = "bool \<times> trm \<times> trm"   \<comment> \<open>(polarity, lhs, rhs): lhs = rhs if True, lhs \<noteq> rhs if False\<close>
-type_synonym clause = "lit list"           \<comment> \<open>disjunction of literals\<close>
+fun cmp_nat :: "nat \<Rightarrow> nat \<Rightarrow> cmp" where
+  "cmp_nat a b = (if a < b then CLt else if a = b then CEq else CGt)"
 
-primrec ev :: "(nat \<Rightarrow> nat) \<Rightarrow> trm \<Rightarrow> nat" where
-  "ev e (TV x) = e x"
-| "ev e TZ = 0"
-| "ev e (TS t) = Suc (ev e t)"
-| "ev e (TP a b) = ev e a + ev e b"
-| "ev e (TM a b) = ev e a * ev e b"
+fun cmp_list :: "nat list \<Rightarrow> nat list \<Rightarrow> cmp" where
+  "cmp_list [] [] = CEq"
+| "cmp_list [] (_ # _) = CLt"
+| "cmp_list (_ # _) [] = CGt"
+| "cmp_list (a # as) (b # bs) = (case cmp_nat a b of CEq \<Rightarrow> cmp_list as bs | c \<Rightarrow> c)"
 
-fun lit_holds :: "(nat \<Rightarrow> nat) \<Rightarrow> lit \<Rightarrow> bool" where
-  "lit_holds e (s, a, b) = ((ev e a = ev e b) = s)"
+definition ser_str :: "string \<Rightarrow> nat list" where
+  "ser_str s = length s # map (\<lambda>c. of_char c) s"
 
-definition holds :: "(nat \<Rightarrow> nat) \<Rightarrow> clause \<Rightarrow> bool" where
-  "holds e cl = (\<exists>l\<in>set cl. lit_holds e l)"
+definition rev_assocd :: "'a \<Rightarrow> ('b \<times> 'a) list \<Rightarrow> 'b \<Rightarrow> 'b" where
+  "rev_assocd a l d = (case find (\<lambda>p. snd p = a) l of Some p \<Rightarrow> fst p | None \<Rightarrow> d)"
 
-definition valid :: "clause \<Rightarrow> bool" where
-  "valid cl = (\<forall>e. holds e cl)"
+definition lsubtract :: "'a list \<Rightarrow> 'a list \<Rightarrow> 'a list" where
+  "lsubtract l1 l2 = filter (\<lambda>x. x \<notin> set l2) l1"
 
-lemma holds_Nil [simp]: "holds e [] = False"
-  by (simp add: holds_def)
+section \<open>Types\<close>
 
-lemma holds_Cons [simp]: "holds e (l # cl) = (lit_holds e l \<or> holds e cl)"
-  by (simp add: holds_def)
+datatype hol_type = Tyvar string | Tyapp string "hol_type list"
 
-lemma holds_append [simp]: "holds e (c1 @ c2) = (holds e c1 \<or> holds e c2)"
-  by (auto simp: holds_def)
+primrec ser_ty :: "hol_type \<Rightarrow> nat list" where
+  "ser_ty (Tyvar v) = 0 # ser_str v"
+| "ser_ty (Tyapp c args) = 1 # ser_str c @ [length args] @ concat (map ser_ty args)"
 
-lemma holds_mono: "set c1 \<subseteq> set c2 \<Longrightarrow> holds e c1 \<Longrightarrow> holds e c2"
-  by (auto simp: holds_def)
+definition cmp_ty :: "hol_type \<Rightarrow> hol_type \<Rightarrow> cmp" where
+  "cmp_ty a b = cmp_list (ser_ty a) (ser_ty b)"
 
-lemma holds_mem: "l \<in> set cl \<Longrightarrow> lit_holds e l \<Longrightarrow> holds e cl"
-  by (auto simp: holds_def)
+definition bool_ty :: hol_type where "bool_ty = Tyapp ''bool'' []"
+definition aty :: hol_type where "aty = Tyvar ''A''"
+definition fun_ty :: "hol_type \<Rightarrow> hol_type \<Rightarrow> hol_type" where "fun_ty a b = Tyapp ''fun'' [a, b]"
 
-lemma lit_obtain: obtains s a b where "(l :: lit) = (s, a, b)"
-  by (metis prod_cases3)
+primrec tyvars :: "hol_type \<Rightarrow> hol_type list" where
+  "tyvars (Tyvar v) = [Tyvar v]"
+| "tyvars (Tyapp c args) = foldr List.union (map tyvars args) []"
 
-section \<open>Variables, substitution, replacement\<close>
+primrec type_subst :: "(hol_type \<times> hol_type) list \<Rightarrow> hol_type \<Rightarrow> hol_type" where
+  "type_subst i (Tyvar v) = rev_assocd (Tyvar v) i (Tyvar v)"
+| "type_subst i (Tyapp c args) = Tyapp c (map (type_subst i) args)"
 
-primrec tvars :: "trm \<Rightarrow> nat list" where
-  "tvars (TV x) = [x]"
-| "tvars TZ = []"
-| "tvars (TS t) = tvars t"
-| "tvars (TP a b) = tvars a @ tvars b"
-| "tvars (TM a b) = tvars a @ tvars b"
+fun dest_fun_ty :: "hol_type \<Rightarrow> (hol_type \<times> hol_type) option" where
+  "dest_fun_ty (Tyapp c [a, b]) = (if c = ''fun'' then Some (a, b) else None)"
+| "dest_fun_ty _ = None"
 
-fun lvars :: "lit \<Rightarrow> nat list" where
-  "lvars (s, a, b) = tvars a @ tvars b"
+section \<open>Terms\<close>
 
-primrec cvars :: "clause \<Rightarrow> nat list" where
-  "cvars [] = []"
-| "cvars (l # cl) = lvars l @ cvars cl"
+datatype hterm = Var string hol_type | Const string hol_type | Comb hterm hterm | Abs hterm hterm
 
-lemma lvars_cvars: "l \<in> set cl \<Longrightarrow> v \<in> set (lvars l) \<Longrightarrow> v \<in> set (cvars cl)"
-  by (induction cl) auto
+primrec ser_tm :: "hterm \<Rightarrow> nat list" where
+  "ser_tm (Var n ty) = 0 # ser_str n @ ser_ty ty"
+| "ser_tm (Const n ty) = 1 # ser_str n @ ser_ty ty"
+| "ser_tm (Comb s t) = 2 # ser_tm s @ ser_tm t"
+| "ser_tm (Abs v t) = 3 # ser_tm v @ ser_tm t"
 
-lemma ev_cong: "(\<forall>v. v \<in> set (tvars t) \<longrightarrow> e1 v = e2 v) \<Longrightarrow> ev e1 t = ev e2 t"
-  by (induction t) auto
+definition cmp_tm :: "hterm \<Rightarrow> hterm \<Rightarrow> cmp" where
+  "cmp_tm a b = cmp_list (ser_tm a) (ser_tm b)"
 
-lemma lit_holds_cong:
-  assumes "\<forall>v. v \<in> set (lvars l) \<longrightarrow> e1 v = e2 v"
-  shows "lit_holds e1 l = lit_holds e2 l"
-proof -
-  obtain s a b where l: "l = (s, a, b)" by (rule lit_obtain)
-  have "ev e1 a = ev e2 a" "ev e1 b = ev e2 b"
-    using assms l by (auto intro: ev_cong)
-  then show ?thesis using l by simp
-qed
+definition bad_ty :: hol_type where "bad_ty = Tyvar []"
 
-lemma holds_cong:
-  assumes "\<forall>v. v \<in> set (cvars cl) \<longrightarrow> e1 v = e2 v"
-  shows "holds e1 cl = holds e2 cl"
-proof -
-  have "\<And>l. l \<in> set cl \<Longrightarrow> lit_holds e1 l = lit_holds e2 l"
-    using assms lvars_cvars by (blast intro: lit_holds_cong)
-  then show ?thesis by (auto simp: holds_def)
-qed
+primrec type_of :: "hterm \<Rightarrow> hol_type" where
+  "type_of (Var _ ty) = ty"
+| "type_of (Const _ ty) = ty"
+| "type_of (Comb s _) = (case type_of s of Tyapp _ (_ # b # _) \<Rightarrow> b | _ \<Rightarrow> bad_ty)"
+| "type_of (Abs v t) = (case v of Var _ ty \<Rightarrow> fun_ty ty (type_of t) | _ \<Rightarrow> bad_ty)"
 
-definition fresh :: "clause \<Rightarrow> nat" where
-  "fresh cl = Suc (foldr max (cvars cl) 0)"
+primrec tm_size :: "hterm \<Rightarrow> nat" where
+  "tm_size (Var _ _) = 1"
+| "tm_size (Const _ _) = 1"
+| "tm_size (Comb s t) = Suc (tm_size s + tm_size t)"
+| "tm_size (Abs v t) = Suc (tm_size v + tm_size t)"
 
-lemma mem_le_foldr: "x \<in> set vs \<Longrightarrow> x \<le> foldr max vs 0"
-  by (induction vs) (auto simp: le_max_iff_disj)
+primrec frees :: "hterm \<Rightarrow> hterm list" where
+  "frees (Var n ty) = [Var n ty]"
+| "frees (Const n ty) = []"
+| "frees (Comb s t) = List.union (frees s) (frees t)"
+| "frees (Abs bv bod) = lsubtract (frees bod) [bv]"
 
-lemma fresh_notin: "fresh cl \<notin> set (cvars cl)"
-  by (auto simp: fresh_def dest: mem_le_foldr)
+definition freesl :: "hterm list \<Rightarrow> hterm list" where
+  "freesl tml = foldr (\<lambda>t acc. List.union (frees t) acc) tml []"
 
-primrec tsubst :: "nat \<Rightarrow> trm \<Rightarrow> trm \<Rightarrow> trm" where
-  "tsubst x r (TV y) = (if y = x then r else TV y)"
-| "tsubst x r TZ = TZ"
-| "tsubst x r (TS t) = TS (tsubst x r t)"
-| "tsubst x r (TP a b) = TP (tsubst x r a) (tsubst x r b)"
-| "tsubst x r (TM a b) = TM (tsubst x r a) (tsubst x r b)"
+primrec vfree_in :: "hterm \<Rightarrow> hterm \<Rightarrow> bool" where
+  "vfree_in v (Var n ty) = (Var n ty = v)"
+| "vfree_in v (Const n ty) = (Const n ty = v)"
+| "vfree_in v (Comb s t) = (vfree_in v s \<or> vfree_in v t)"
+| "vfree_in v (Abs bv bod) = (v \<noteq> bv \<and> vfree_in v bod)"
 
-lemma ev_tsubst: "ev e (tsubst x r t) = ev (e(x := ev e r)) t"
-  by (induction t) auto
+primrec type_vars_in_term :: "hterm \<Rightarrow> hol_type list" where
+  "type_vars_in_term (Var _ ty) = tyvars ty"
+| "type_vars_in_term (Const _ ty) = tyvars ty"
+| "type_vars_in_term (Comb s t) = List.union (type_vars_in_term s) (type_vars_in_term t)"
+| "type_vars_in_term (Abs v t) = List.union (type_vars_in_term v) (type_vars_in_term t)"
 
-fun lsubst :: "nat \<Rightarrow> trm \<Rightarrow> lit \<Rightarrow> lit" where
-  "lsubst x r (s, a, b) = (s, tsubst x r a, tsubst x r b)"
+text \<open>@{text variant}: rename a variable by appending primes until it is not free in any
+  term of @{text avoid}.  The number of primes ever needed is bounded by the total size of
+  the avoided terms, which is used as fuel.\<close>
 
-definition csubst :: "nat \<Rightarrow> trm \<Rightarrow> clause \<Rightarrow> clause" where
-  "csubst x r cl = map (lsubst x r) cl"
+primrec variant_n :: "nat \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "variant_n 0 avoid v = v"
+| "variant_n (Suc n) avoid v =
+     (if \<not> list_ex (vfree_in v) avoid then v
+      else case v of Var s ty \<Rightarrow> variant_n n avoid (Var (s @ [CHR 0x27]) ty) | _ \<Rightarrow> v)"
 
-lemma lit_holds_lsubst: "lit_holds e (lsubst x r l) = lit_holds (e(x := ev e r)) l"
-proof -
-  obtain s a b where "l = (s, a, b)" by (rule lit_obtain)
-  then show ?thesis by (simp add: ev_tsubst)
-qed
+definition variant :: "hterm list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "variant avoid v = variant_n (Suc (sum_list (map tm_size avoid))) avoid v"
 
-lemma holds_csubst: "holds e (csubst x r cl) = holds (e(x := ev e r)) cl"
-  by (auto simp: holds_def csubst_def lit_holds_lsubst)
+text \<open>Capture-avoiding substitution of terms for variables; @{text ilist} holds pairs
+  @{text "(replacement, variable)"}.\<close>
 
-text \<open>Replacement of a term @{text a} by @{text b} (used by cross-fertilization and generalization).\<close>
+primrec vsubst :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "vsubst ilist (Const n ty) = Const n ty"
+| "vsubst ilist (Var n ty) = rev_assocd (Var n ty) ilist (Var n ty)"
+| "vsubst ilist (Comb s t) = Comb (vsubst ilist s) (vsubst ilist t)"
+| "vsubst ilist (Abs v s) =
+     (let ilist' = filter (\<lambda>p. snd p \<noteq> v) ilist in
+      if ilist' = [] then Abs v s
+      else
+        let s' = vsubst ilist' s in
+        if s' = s then Abs v s
+        else if list_ex (\<lambda>p. vfree_in v (fst p) \<and> vfree_in (snd p) s) ilist'
+        then (let v' = variant [s'] v in Abs v' (vsubst ((v', v) # ilist') s))
+        else Abs v s')"
 
-primrec trep :: "trm \<Rightarrow> trm \<Rightarrow> trm \<Rightarrow> trm" where
-  "trep a b (TV y) = (if TV y = a then b else TV y)"
-| "trep a b TZ = (if TZ = a then b else TZ)"
-| "trep a b (TS t) = (if TS t = a then b else TS (trep a b t))"
-| "trep a b (TP u v) = (if TP u v = a then b else TP (trep a b u) (trep a b v))"
-| "trep a b (TM u v) = (if TM u v = a then b else TM (trep a b u) (trep a b v))"
+definition vsubst_checked :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<Rightarrow> hterm option" where
+  "vsubst_checked theta tm =
+     (if theta = [] then Some tm
+      else if list_all (\<lambda>p. (case snd p of Var _ ty \<Rightarrow> type_of (fst p) = ty | _ \<Rightarrow> False)) theta
+      then Some (vsubst theta tm) else None)"
 
-fun lrep :: "trm \<Rightarrow> trm \<Rightarrow> lit \<Rightarrow> lit" where
-  "lrep a b (s, u, v) = (s, trep a b u, trep a b v)"
+text \<open>Type instantiation of terms.  The OCaml @{text Clash} exception is the result
+  constructor @{text IClash}.\<close>
 
-definition crep :: "trm \<Rightarrow> trm \<Rightarrow> clause \<Rightarrow> clause" where
-  "crep a b cl = map (lrep a b) cl"
+datatype instres = IOk hterm | IClash hterm | IFail
 
-lemma ev_trep_eq: "ev e a = ev e b \<Longrightarrow> ev e (trep a b t) = ev e t"
-  by (induction t) auto
+primrec inst_n :: "nat \<Rightarrow> (hterm \<times> hterm) list \<Rightarrow> (hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> instres" where
+  "inst_n 0 env tyin tm = IFail"
+| "inst_n (Suc n) env tyin tm =
+     (case tm of
+        Var nm ty \<Rightarrow>
+          (let ty' = type_subst tyin ty; tm' = Var nm ty' in
+           if rev_assocd tm' env tm = tm then IOk tm' else IClash tm')
+      | Const c ty \<Rightarrow> IOk (Const c (type_subst tyin ty))
+      | Comb f x \<Rightarrow>
+          (case inst_n n env tyin f of
+             IOk f' \<Rightarrow> (case inst_n n env tyin x of IOk x' \<Rightarrow> IOk (Comb f' x') | r \<Rightarrow> r)
+           | r \<Rightarrow> r)
+      | Abs y t \<Rightarrow>
+          (case inst_n n [] tyin y of
+             IOk y' \<Rightarrow>
+               (let env' = (y, y') # env in
+                case inst_n n env' tyin t of
+                  IOk t' \<Rightarrow> IOk (Abs y' t')
+                | IFail \<Rightarrow> IFail
+                | IClash w' \<Rightarrow>
+                    if w' \<noteq> y' then IClash w'
+                    else
+                      (let ifrees = map (\<lambda>v. case inst_n n [] tyin v of IOk v' \<Rightarrow> v' | _ \<Rightarrow> v) (frees t);
+                           y'' = variant ifrees y'
+                       in case (y'', y) of
+                            (Var nm2 _, Var _ ty0) \<Rightarrow>
+                              inst_n n env tyin (Abs (Var nm2 ty0) (vsubst [(Var nm2 ty0, y)] t))
+                          | _ \<Rightarrow> IFail))
+           | r \<Rightarrow> r))"
 
-lemma lit_holds_lrep_eq:
-  "ev e a = ev e b \<Longrightarrow> lit_holds e (lrep a b l) = lit_holds e l"
-proof -
-  assume h: "ev e a = ev e b"
-  obtain s u v where "l = (s, u, v)" by (rule lit_obtain)
-  then show ?thesis by (simp add: ev_trep_eq[OF h])
-qed
+definition inst :: "(hol_type \<times> hol_type) list \<Rightarrow> hterm \<Rightarrow> hterm option" where
+  "inst tyin tm =
+     (if tyin = [] then Some tm
+      else case inst_n (4 * (tm_size tm + 1) * (tm_size tm + 1)) [] tyin tm of
+             IOk t \<Rightarrow> Some t | _ \<Rightarrow> None)"
 
-lemma ev_trep_var:
-  "x \<notin> set (tvars u) \<Longrightarrow> ev (e(x := ev e t)) (trep t (TV x) u) = ev e u"
-  by (induction u) auto
+section \<open>Alpha-equivalence\<close>
 
-lemma lit_holds_lrep_var:
-  "x \<notin> set (lvars l) \<Longrightarrow> lit_holds (e(x := ev e t)) (lrep t (TV x) l) = lit_holds e l"
-proof -
-  assume h: "x \<notin> set (lvars l)"
-  obtain s u v where l: "l = (s, u, v)" by (rule lit_obtain)
-  then show ?thesis using h by (simp add: ev_trep_var)
-qed
+fun ordav :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> cmp" where
+  "ordav [] x1 x2 = cmp_tm x1 x2"
+| "ordav ((t1, t2) # oenv) x1 x2 =
+     (if cmp_tm x1 t1 = CEq then (if cmp_tm x2 t2 = CEq then CEq else CLt)
+      else if cmp_tm x2 t2 = CEq then CGt
+      else ordav oenv x1 x2)"
 
-lemma holds_crep_var:
-  assumes "x \<notin> set (cvars cl)"
-  shows "holds (e(x := ev e t)) (crep t (TV x) cl) = holds e cl"
-proof -
-  have "\<And>l. l \<in> set cl \<Longrightarrow> x \<notin> set (lvars l)"
-    using assms lvars_cvars by blast
-  then show ?thesis
-    by (auto simp: holds_def crep_def lit_holds_lrep_var)
-qed
+definition rank :: "hterm \<Rightarrow> nat" where
+  "rank t = (case t of Const _ _ \<Rightarrow> 0 | Var _ _ \<Rightarrow> 1 | Comb _ _ \<Rightarrow> 2 | Abs _ _ \<Rightarrow> 3)"
 
-section \<open>Outcomes of processes and their soundness\<close>
+fun orda :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> cmp" where
+  "orda env (Var a b) (Var c d) = ordav env (Var a b) (Var c d)"
+| "orda env (Const a b) (Const c d) = cmp_tm (Const a b) (Const c d)"
+| "orda env (Comb s1 t1) (Comb s2 t2) =
+     (case orda env s1 s2 of CEq \<Rightarrow> orda env t1 t2 | c \<Rightarrow> c)"
+| "orda env (Abs (Var n1 ty1) t1) (Abs (Var n2 ty2) t2) =
+     (case cmp_ty ty1 ty2 of
+        CEq \<Rightarrow> orda ((Var n1 ty1, Var n2 ty2) # env) t1 t2
+      | c \<Rightarrow> c)"
+| "orda env a b = cmp_nat (rank a) (rank b)"
 
-datatype outcome = Proved | Refuted | Subgoals "clause list" | Pass
+definition alphaorder :: "hterm \<Rightarrow> hterm \<Rightarrow> cmp" where
+  "alphaorder = orda []"
 
-fun sound_out :: "clause \<Rightarrow> outcome \<Rightarrow> bool" where
-  "sound_out cl Proved = valid cl"
-| "sound_out cl Refuted = (\<not> valid cl)"
-| "sound_out cl (Subgoals cs) = ((\<forall>c\<in>set cs. valid c) \<longrightarrow> valid cl)"
-| "sound_out cl Pass = True"
+definition aconv :: "hterm \<Rightarrow> hterm \<Rightarrow> bool" where
+  "aconv s t = (alphaorder s t = CEq)"
+
+fun term_remove :: "hterm \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "term_remove tm [] = []"
+| "term_remove tm (s # ss) =
+     (case alphaorder tm s of
+        CGt \<Rightarrow> s # term_remove tm ss
+      | CEq \<Rightarrow> ss
+      | CLt \<Rightarrow> s # ss)"
+
+fun term_union :: "hterm list \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "term_union [] l2 = l2"
+| "term_union l1 [] = l1"
+| "term_union (h1 # t1) (h2 # t2) =
+     (case alphaorder h1 h2 of
+        CEq \<Rightarrow> h1 # term_union t1 t2
+      | CLt \<Rightarrow> h1 # term_union t1 (h2 # t2)
+      | CGt \<Rightarrow> h2 # term_union (h1 # t1) t2)"
+
+fun term_image :: "(hterm \<Rightarrow> hterm) \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "term_image f [] = []"
+| "term_image f (h # t) = term_union [f h] (term_image f t)"
+
+section \<open>Kernel state\<close>
+
+datatype hthm = Sequent "hterm list" hterm
+
+fun hyp :: "hthm \<Rightarrow> hterm list" where "hyp (Sequent asl _) = asl"
+fun concl :: "hthm \<Rightarrow> hterm" where "concl (Sequent _ c) = c"
+
+record kstate =
+  the_type_constants :: "(string \<times> nat) list"
+  the_term_constants :: "(string \<times> hol_type) list"
+  the_axioms :: "hthm list"
+  the_definitions :: "hthm list"
+
+definition init_kstate :: kstate where
+  "init_kstate =
+     \<lparr> the_type_constants = [(''bool'', 0), (''fun'', 2)],
+       the_term_constants = [(''='', fun_ty aty (fun_ty aty bool_ty))],
+       the_axioms = [],
+       the_definitions = [] \<rparr>"
+
+definition get_type_arity :: "kstate \<Rightarrow> string \<Rightarrow> nat option" where
+  "get_type_arity ks s = map_of (the_type_constants ks) s"
+
+definition get_const_type :: "kstate \<Rightarrow> string \<Rightarrow> hol_type option" where
+  "get_const_type ks s = map_of (the_term_constants ks) s"
+
+definition new_type :: "kstate \<Rightarrow> string \<times> nat \<Rightarrow> kstate option" where
+  "new_type ks p =
+     (case get_type_arity ks (fst p) of
+        Some _ \<Rightarrow> None
+      | None \<Rightarrow> Some (ks\<lparr> the_type_constants := p # the_type_constants ks \<rparr>))"
+
+definition new_constant :: "kstate \<Rightarrow> string \<times> hol_type \<Rightarrow> kstate option" where
+  "new_constant ks p =
+     (case get_const_type ks (fst p) of
+        Some _ \<Rightarrow> None
+      | None \<Rightarrow> Some (ks\<lparr> the_term_constants := p # the_term_constants ks \<rparr>))"
+
+definition mk_type :: "kstate \<Rightarrow> string \<Rightarrow> hol_type list \<Rightarrow> hol_type option" where
+  "mk_type ks tyop args =
+     (case get_type_arity ks tyop of
+        Some arity \<Rightarrow> if arity = length args then Some (Tyapp tyop args) else None
+      | None \<Rightarrow> None)"
+
+definition mk_const :: "kstate \<Rightarrow> string \<Rightarrow> (hol_type \<times> hol_type) list \<Rightarrow> hterm option" where
+  "mk_const ks name theta =
+     (case get_const_type ks name of
+        Some uty \<Rightarrow> Some (Const name (type_subst theta uty))
+      | None \<Rightarrow> None)"
+
+definition mk_comb :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm option" where
+  "mk_comb f a =
+     (case dest_fun_ty (type_of f) of
+        Some (ty, _) \<Rightarrow> if ty = type_of a then Some (Comb f a) else None
+      | None \<Rightarrow> None)"
+
+definition mk_abs :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm option" where
+  "mk_abs bvar bod = (case bvar of Var _ _ \<Rightarrow> Some (Abs bvar bod) | _ \<Rightarrow> None)"
+
+definition mk_var :: "string \<Rightarrow> hol_type \<Rightarrow> hterm" where
+  "mk_var v ty = Var v ty"
+
+fun dest_comb :: "hterm \<Rightarrow> (hterm \<times> hterm) option" where
+  "dest_comb (Comb f x) = Some (f, x)" | "dest_comb _ = None"
+
+fun dest_abs :: "hterm \<Rightarrow> (hterm \<times> hterm) option" where
+  "dest_abs (Abs v b) = Some (v, b)" | "dest_abs _ = None"
+
+fun dest_var :: "hterm \<Rightarrow> (string \<times> hol_type) option" where
+  "dest_var (Var n ty) = Some (n, ty)" | "dest_var _ = None"
+
+fun dest_const :: "hterm \<Rightarrow> (string \<times> hol_type) option" where
+  "dest_const (Const n ty) = Some (n, ty)" | "dest_const _ = None"
+
+definition safe_mk_eq :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "safe_mk_eq l r =
+     (let ty = type_of l in
+      Comb (Comb (Const ''='' (fun_ty ty (fun_ty ty bool_ty))) l) r)"
+
+fun dest_eq :: "hterm \<Rightarrow> (hterm \<times> hterm) option" where
+  "dest_eq (Comb (Comb (Const n _) l) r) = (if n = ''='' then Some (l, r) else None)"
+| "dest_eq _ = None"
+
+section \<open>Primitive inference rules\<close>
+
+definition REFL :: "hterm \<Rightarrow> hthm" where
+  "REFL tm = Sequent [] (safe_mk_eq tm tm)"
+
+fun TRANS :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "TRANS (Sequent asl1 (Comb (Comb (Const n1 t1) l) m1)) (Sequent asl2 (Comb (Comb (Const n2 t2) m2) r)) =
+     (if n1 = ''='' \<and> n2 = ''='' \<and> aconv m1 m2
+      then Some (Sequent (term_union asl1 asl2) (Comb (Comb (Const n1 t1) l) r))
+      else None)"
+| "TRANS _ _ = None"
+
+fun MK_COMB :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "MK_COMB (Sequent asl1 (Comb (Comb (Const n1 _) l1) r1)) (Sequent asl2 (Comb (Comb (Const n2 _) l2) r2)) =
+     (if n1 = ''='' \<and> n2 = ''=''
+      then (case dest_fun_ty (type_of l1) of
+              Some (ty, _) \<Rightarrow>
+                if ty = type_of l2
+                then Some (Sequent (term_union asl1 asl2) (safe_mk_eq (Comb l1 l2) (Comb r1 r2)))
+                else None
+            | None \<Rightarrow> None)
+      else None)"
+| "MK_COMB _ _ = None"
+
+fun ABS :: "hterm \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "ABS (Var n ty) (Sequent asl (Comb (Comb (Const c _) l) r)) =
+     (if c = ''='' \<and> \<not> list_ex (vfree_in (Var n ty)) asl
+      then Some (Sequent asl (safe_mk_eq (Abs (Var n ty) l) (Abs (Var n ty) r)))
+      else None)"
+| "ABS _ _ = None"
+
+fun BETA :: "hterm \<Rightarrow> hthm option" where
+  "BETA (Comb (Abs v bod) arg) =
+     (if arg = v then Some (Sequent [] (safe_mk_eq (Comb (Abs v bod) arg) bod)) else None)"
+| "BETA _ = None"
+
+definition ASSUME :: "hterm \<Rightarrow> hthm option" where
+  "ASSUME tm = (if type_of tm = bool_ty then Some (Sequent [tm] tm) else None)"
+
+fun EQ_MP :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "EQ_MP (Sequent asl1 (Comb (Comb (Const c _) l) r)) (Sequent asl2 c2) =
+     (if c = ''='' \<and> aconv l c2 then Some (Sequent (term_union asl1 asl2) r) else None)"
+| "EQ_MP _ _ = None"
+
+fun DEDUCT_ANTISYM_RULE :: "hthm \<Rightarrow> hthm \<Rightarrow> hthm" where
+  "DEDUCT_ANTISYM_RULE (Sequent asl1 c1) (Sequent asl2 c2) =
+     Sequent (term_union (term_remove c2 asl1) (term_remove c1 asl2)) (safe_mk_eq c1 c2)"
+
+fun INST_TYPE :: "(hol_type \<times> hol_type) list \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "INST_TYPE theta (Sequent asl c) =
+     (case those (map (inst theta) asl) of
+        Some asl' \<Rightarrow>
+          (case inst theta c of
+             Some c' \<Rightarrow> Some (Sequent (fold (\<lambda>h acc. term_union [h] acc) (rev asl') []) c')
+           | None \<Rightarrow> None)
+      | None \<Rightarrow> None)"
+
+fun INST :: "(hterm \<times> hterm) list \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "INST theta (Sequent asl c) =
+     (case vsubst_checked theta c of
+        Some c' \<Rightarrow>
+          (case those (map (vsubst_checked theta) asl) of
+             Some asl' \<Rightarrow> Some (Sequent (fold (\<lambda>h acc. term_union [h] acc) (rev asl') []) c')
+           | None \<Rightarrow> None)
+      | None \<Rightarrow> None)"
+
+section \<open>Extension principles\<close>
+
+definition new_axiom :: "kstate \<Rightarrow> hterm \<Rightarrow> (kstate \<times> hthm) option" where
+  "new_axiom ks tm =
+     (if type_of tm = bool_ty
+      then (let th = Sequent [] tm in Some (ks\<lparr> the_axioms := th # the_axioms ks \<rparr>, th))
+      else None)"
+
+definition new_basic_definition :: "kstate \<Rightarrow> hterm \<Rightarrow> (kstate \<times> hthm) option" where
+  "new_basic_definition ks tm =
+     (case tm of
+        Comb (Comb (Const eq _) (Var cname ty)) r \<Rightarrow>
+          if eq \<noteq> ''='' then None
+          else if frees r \<noteq> [] then None
+          else if \<not> set (type_vars_in_term r) \<subseteq> set (tyvars ty) then None
+          else
+            (case new_constant ks (cname, ty) of
+               None \<Rightarrow> None
+             | Some ks' \<Rightarrow>
+                 (let dth = Sequent [] (safe_mk_eq (Const cname ty) r)
+                  in Some (ks'\<lparr> the_definitions := dth # the_definitions ks' \<rparr>, dth)))
+      | _ \<Rightarrow> None)"
+
+fun isort :: "hol_type list \<Rightarrow> hol_type list" where
+  "isort [] = []"
+| "isort (x # xs) =
+     (let ys = isort xs in
+      takeWhile (\<lambda>y. cmp_ty y x = CLt) ys @ [x] @ dropWhile (\<lambda>y. cmp_ty y x = CLt) ys)"
+
+definition new_basic_type_definition ::
+  "kstate \<Rightarrow> string \<Rightarrow> string \<times> string \<Rightarrow> hthm \<Rightarrow> (kstate \<times> hthm \<times> hthm) option" where
+  "new_basic_type_definition ks tyname names th =
+     (case names of (absname, repname) \<Rightarrow>
+      (case th of Sequent asl c \<Rightarrow>
+        if get_const_type ks absname \<noteq> None \<or> get_const_type ks repname \<noteq> None then None
+        else if asl \<noteq> [] then None
+        else
+          (case c of
+             Comb P x \<Rightarrow>
+               if frees P \<noteq> [] then None
+               else
+                 (let tvs = isort (type_vars_in_term P) in
+                  case new_type ks (tyname, length tvs) of
+                    None \<Rightarrow> None
+                  | Some ks1 \<Rightarrow>
+                      (let aty' = Tyapp tyname tvs; rty = type_of x;
+                           absty = fun_ty rty aty'; repty = fun_ty aty' rty
+                       in case new_constant ks1 (absname, absty) of
+                            None \<Rightarrow> None
+                          | Some ks2 \<Rightarrow>
+                              (case new_constant ks2 (repname, repty) of
+                                 None \<Rightarrow> None
+                               | Some ks3 \<Rightarrow>
+                                   (let abs' = Const absname absty; rep' = Const repname repty;
+                                        a = Var ''a'' aty'; r = Var ''r'' rty
+                                    in Some (ks3,
+                                       Sequent [] (safe_mk_eq (Comb abs' (Comb rep' a)) a),
+                                       Sequent [] (safe_mk_eq (Comb P r)
+                                                     (safe_mk_eq (Comb rep' (Comb abs' r)) r)))))))
+           | _ \<Rightarrow> None)))"
 
 end

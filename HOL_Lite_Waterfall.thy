@@ -1,514 +1,956 @@
 theory HOL_Lite_Waterfall
-  imports HOL_Lite_Kernel
+  imports HOL_Lite_Bool
 begin
 
 text \<open>
-  The waterfall: tautology check, counterexample check, substitution, simplification,
-  equality (cross-fertilization) and generalization, each proved sound against the
-  kernel semantics; induction on the pool; and the fuel-bounded prover with its
-  soundness theorem.
+  The Boyer-Moore waterfall of "The Boyer-Moore Waterfall Model Revisited"
+  (Papapanagiotou & Fleuriot), built as a proof-producing tactic on top of the HOL Light
+  kernel port.  Every heuristic returns either a theorem, or subgoals together with a
+  justification that rebuilds a theorem of the goal from theorems of the subgoals; all
+  theorems are constructed by the kernel rules, so the prover cannot return a wrong theorem.
+
+  Contents (section numbers refer to the paper):
+  Section 3.2 shells;  3.3.1 clausal form;  3.3.2 substitution;
+  3.3.3 simplify;  3.3.4 equality (cross-fertilization);
+  3.3.5 generalization (minimal common subterms, generalization lemmas);
+  3.3.6 irrelevance;  4.2.2 warehouse filter and maximum term depth;
+  4.3 tautology and setify heuristics;  4.4.1 Aderhold's common subterm
+  generalization;  4.4.2 generalizing variables apart;  4.4.3 the
+  counterexample checker; induction on the pool.
 \<close>
 
-section \<open>Process: tautology check\<close>
+section \<open>Shells (Section 3.2)\<close>
 
-fun taut_lit :: "clause \<Rightarrow> lit \<Rightarrow> bool" where
-  "taut_lit cl (s, a, b) = (s \<and> (a = b \<or> (False, a, b) \<in> set cl))"
+record shell =
+  sh_name :: string
+  sh_ty :: hol_type
+  sh_bottoms :: "hterm list"
+  sh_cons :: "hterm list"
+  sh_accs :: "hterm list"
+  sh_type_axiom :: "hthm option"
+  sh_induct :: hthm
+  sh_cases :: "hthm option"
+  sh_distinct :: "hthm list"
+  sh_oneone :: "hthm list"
+  sh_accdefs :: "hthm list"
 
-definition is_taut :: "clause \<Rightarrow> bool" where
-  "is_taut cl = list_ex (taut_lit cl) cl"
+fun const_name :: "hterm \<Rightarrow> string option" where
+  "const_name (Const n _) = Some n"
+| "const_name _ = None"
 
-lemma taut_holds: "is_taut cl \<Longrightarrow> holds e cl"
-proof -
-  assume "is_taut cl"
-  then obtain l where l: "l \<in> set cl" "taut_lit cl l"
-    by (auto simp: is_taut_def list_ex_iff)
-  obtain s a b where lab: "l = (s, a, b)" by (rule lit_obtain)
-  with l have s: "s" and ab: "a = b \<or> (False, a, b) \<in> set cl" by auto
-  show ?thesis
-  proof (cases "a = b")
-    case True
-    with s lab l show ?thesis by (auto intro: holds_mem)
-  next
-    case False
-    with ab have neg: "(False, a, b) \<in> set cl" by simp
-    show ?thesis
-    proof (cases "ev e a = ev e b")
-      case True
-      with s lab l show ?thesis by (auto intro: holds_mem)
-    next
-      case False
-      with neg show ?thesis by (auto intro: holds_mem)
-    qed
-  qed
-qed
+definition shell_con_names :: "shell \<Rightarrow> string list" where
+  "shell_con_names sh = List.map_filter const_name (sh_bottoms sh @ sh_cons sh)"
 
-definition taut_proc :: "clause \<Rightarrow> outcome" where
-  "taut_proc cl = (if is_taut cl then Proved else Pass)"
+definition shell_acc_names :: "shell \<Rightarrow> string list" where
+  "shell_acc_names sh = List.map_filter const_name (sh_accs sh)"
 
-lemma taut_proc_sound: "sound_out cl (taut_proc cl)"
-  by (simp add: taut_proc_def valid_def taut_holds)
+definition is_con_name :: "shell list \<Rightarrow> string \<Rightarrow> bool" where
+  "is_con_name shs n = list_ex (\<lambda>sh. n \<in> set (shell_con_names sh)) shs"
 
-section \<open>Process: counterexample check\<close>
+definition is_acc_name :: "shell list \<Rightarrow> string \<Rightarrow> bool" where
+  "is_acc_name shs n = list_ex (\<lambda>sh. n \<in> set (shell_acc_names sh)) shs"
 
-fun envs :: "nat list \<Rightarrow> (nat \<Rightarrow> nat) list" where
-  "envs [] = [\<lambda>_. 0]"
-| "envs (v # vs) = concat (map (\<lambda>e. map (\<lambda>k. e(v := k)) [0, 1, 2]) (envs vs))"
+fun is_var :: "hterm \<Rightarrow> bool" where
+  "is_var (Var _ _) = True" | "is_var _ = False"
 
-definition refuted :: "clause \<Rightarrow> bool" where
-  "refuted cl = list_ex (\<lambda>e. \<not> holds e cl) (envs (cvars cl))"
+text \<open>Explicit value templates: non-variable terms made of constants, or constructors
+  applied to bottom objects or variables.\<close>
 
-definition counter_proc :: "clause \<Rightarrow> outcome" where
-  "counter_proc cl = (if refuted cl then Refuted else Pass)"
+primrec is_template_n :: "nat \<Rightarrow> shell list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "is_template_n 0 shs t = False"
+| "is_template_n (Suc k) shs t =
+     (case strip_comb t of
+        (Const n _, args) \<Rightarrow>
+          is_con_name shs n \<and> list_all (\<lambda>a. is_var a \<or> is_template_n k shs a) args
+      | _ \<Rightarrow> False)"
 
-lemma refuted_not_valid: "refuted cl \<Longrightarrow> \<not> valid cl"
-  by (auto simp: refuted_def list_ex_iff valid_def)
+definition is_template :: "shell list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "is_template shs t = is_template_n (tm_size t) shs t"
 
-lemma counter_proc_sound: "sound_out cl (counter_proc cl)"
-  by (simp add: counter_proc_def refuted_not_valid)
+definition is_accessor_app :: "shell list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "is_accessor_app shs t = (case strip_comb t of (Const n _, _ # _) \<Rightarrow> is_acc_name shs n | _ \<Rightarrow> False)"
 
-section \<open>Literal-driven steps (substitution and equality)\<close>
+primrec has_con_n :: "nat \<Rightarrow> shell list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "has_con_n 0 shs t = False"
+| "has_con_n (Suc k) shs t =
+     (case t of
+        Const n _ \<Rightarrow> is_con_name shs n
+      | Comb f x \<Rightarrow> has_con_n k shs f \<or> has_con_n k shs x
+      | Abs _ b \<Rightarrow> has_con_n k shs b
+      | Var _ _ \<Rightarrow> False)"
 
-definition good_step :: "(lit \<Rightarrow> clause \<Rightarrow> clause list) \<Rightarrow> bool" where
-  "good_step st = (\<forall>l n cl. l \<in> set cl \<longrightarrow> n \<in> set (st l cl) \<longrightarrow> valid n \<longrightarrow> valid cl)"
+definition has_constructor :: "shell list \<Rightarrow> hterm \<Rightarrow> bool" where
+  "has_constructor shs t = has_con_n (tm_size t) shs t"
 
-definition first_step :: "(lit \<Rightarrow> clause \<Rightarrow> clause list) \<Rightarrow> clause \<Rightarrow> outcome" where
-  "first_step st cl = (case concat (map (\<lambda>l. st l cl) cl) of [] \<Rightarrow> Pass | n # _ \<Rightarrow> Subgoals [n])"
+section \<open>Contexts, states and heuristics\<close>
 
-lemma first_step_sound:
-  assumes "good_step st"
-  shows "sound_out cl (first_step st cl)"
-proof (cases "concat (map (\<lambda>l. st l cl) cl)")
-  case Nil
-  then show ?thesis by (simp add: first_step_def)
-next
-  case (Cons n ns)
-  then have "n \<in> set (concat (map (\<lambda>l. st l cl) cl))" by simp
-  then obtain l where l: "l \<in> set cl" "n \<in> set (st l cl)" by auto
-  have "valid n \<longrightarrow> valid cl" using assms l unfolding good_step_def by blast
-  then show ?thesis using Cons by (simp add: first_step_def)
-qed
+datatype heur =
+    H_Clausal | H_Taut | H_Setify | H_Subst | H_Simp | H_Equal
+  | H_GenBM | H_GenAd | H_GenApart | H_Irrel
 
-subsection \<open>Substitution: eliminate a negated equality x \<noteq> t\<close>
+definition pp_heur :: "heur \<Rightarrow> string" where
+  "pp_heur h =
+     (case h of
+        H_Clausal \<Rightarrow> ''Clausal Form Heuristic'' | H_Taut \<Rightarrow> ''Tautology Heuristic''
+      | H_Setify \<Rightarrow> ''Setify Heuristic'' | H_Subst \<Rightarrow> ''Substitution Heuristic''
+      | H_Simp \<Rightarrow> ''Simplify Heuristic'' | H_Equal \<Rightarrow> ''Equality Heuristic''
+      | H_GenBM \<Rightarrow> ''Generalization Heuristic'' | H_GenAd \<Rightarrow> ''Common Subterm Generalization''
+      | H_GenApart \<Rightarrow> ''Generalizing Variables Apart'' | H_Irrel \<Rightarrow> ''Irrelevance Heuristic'')"
 
-fun subst_step :: "lit \<Rightarrow> clause \<Rightarrow> clause list" where
-  "subst_step (s, a, t) cl =
-     (case a of
-        TV x \<Rightarrow> if \<not> s \<and> x \<notin> set (tvars t)
-                then [csubst x t (remove1 (s, a, t) cl)] else []
-      | _ \<Rightarrow> [])"
+record wctx =
+  w_shells :: "shell list"
+  w_rules :: "hthm list"
+  w_glemmas :: "(hthm \<times> hterm) list"
+  w_order :: "heur list"
+  w_maxdepth :: nat
+  w_ncex :: nat
+  w_rwfuel :: nat
 
-lemma good_subst_step: "good_step subst_step"
-  unfolding good_step_def
-proof (intro allI impI)
-  fix l n cl
-  assume lcl: "l \<in> set cl" and n: "n \<in> set (subst_step l cl)" and vn: "valid n"
-  obtain s a t where l: "l = (s, a, t)" by (rule lit_obtain)
-  show "valid cl"
-  proof (cases a)
-    case (TV x)
-    with n l have s: "\<not> s" and nn: "n = csubst x t (remove1 (s, a, t) cl)"
-      by (auto split: if_splits)
-    show ?thesis
-      unfolding valid_def
-    proof
-      fix e
-      have hn: "holds (e(x := ev e t)) (remove1 (s, a, t) cl)"
-        using vn nn unfolding valid_def by (auto simp: holds_csubst)
-      show "holds e cl"
-      proof (cases "e x = ev e t")
-        case True
-        then have "e(x := ev e t) = e" by (simp add: fun_upd_idem)
-        with hn have "holds e (remove1 (s, a, t) cl)" by simp
-        then show ?thesis by (rule holds_mono[OF set_remove1_subset])
-      next
-        case False
-        with TV s have "lit_holds e (s, a, t)" by simp
-        with lcl l show ?thesis by (auto intro: holds_mem)
-      qed
-    qed
-  next
-    case TZ with n l show ?thesis by simp
-  next
-    case TS with n l show ?thesis by simp
-  next
-    case TP with n l show ?thesis by simp
-  next
-    case TM with n l show ?thesis by simp
-  qed
-qed
+record wst =
+  w_trace :: "string list"
+  w_steps :: nat
+  w_inds :: nat
+  w_gens :: nat
+  w_overs :: nat
+  w_seed :: nat
+  w_gened :: "hterm list"
 
-definition subst_proc :: "clause \<Rightarrow> outcome" where
-  "subst_proc = first_step subst_step"
+definition init_wst :: wst where
+  "init_wst = \<lparr> w_trace = [], w_steps = 0, w_inds = 0, w_gens = 0, w_overs = 0, w_seed = 42, w_gened = [] \<rparr>"
 
-lemma subst_proc_sound: "sound_out cl (subst_proc cl)"
-  unfolding subst_proc_def by (rule first_step_sound[OF good_subst_step])
+definition add_note :: "string \<Rightarrow> wst \<Rightarrow> wst" where
+  "add_note s st = st\<lparr> w_trace := s # w_trace st \<rparr>"
 
-subsection \<open>Equality (cross-fertilization): use a hypothesis a \<noteq> b to replace a by b\<close>
+text \<open>The outcome of a heuristic: failure (pass the clause on), a proof, disproof, or
+  subgoals with a justification.\<close>
 
-primrec is_tmpl :: "trm \<Rightarrow> bool" where   \<comment> \<open>explicit value templates\<close>
-  "is_tmpl (TV x) = True"
-| "is_tmpl TZ = True"
-| "is_tmpl (TS t) = is_tmpl t"
-| "is_tmpl (TP a b) = False"
-| "is_tmpl (TM a b) = False"
+datatype hres =
+    HFail
+  | HProved hthm
+  | HDisproved
+  | HSub "hterm list" "hthm list \<Rightarrow> hthm option"
 
-fun eq_step :: "lit \<Rightarrow> clause \<Rightarrow> clause list" where
-  "eq_step (s, a, b) cl =
-     (if \<not> s \<and> a \<noteq> b \<and> \<not> is_tmpl a
-         \<and> map (lrep a b) (remove1 (s, a, b) cl) \<noteq> remove1 (s, a, b) cl
-      then [(s, a, b) # map (lrep a b) (remove1 (s, a, b) cl)] else [])"
+section \<open>Clause manipulation with proof\<close>
 
-lemma good_eq_step: "good_step eq_step"
-  unfolding good_step_def
-proof (intro allI impI)
-  fix l n cl
-  assume lcl: "l \<in> set cl" and n: "n \<in> set (eq_step l cl)" and vn: "valid n"
-  obtain s a b where l: "l = (s, a, b)" by (rule lit_obtain)
-  from n l have s: "\<not> s" and nn: "n = (s, a, b) # map (lrep a b) (remove1 (s, a, b) cl)"
-    by (auto split: if_splits)
-  show "valid cl"
-    unfolding valid_def
-  proof
-    fix e
-    have hn: "holds e n" using vn unfolding valid_def by blast
-    show "holds e cl"
-    proof (cases "ev e a = ev e b")
-      case True
-      then have "\<not> lit_holds e (s, a, b)" using s by simp
-      with hn nn have "holds e (map (lrep a b) (remove1 (s, a, b) cl))" by simp
-      then obtain l' where l': "l' \<in> set (remove1 (s, a, b) cl)" "lit_holds e (lrep a b l')"
-        by (auto simp: holds_def)
-      from l'(2) True have "lit_holds e l'" by (simp add: lit_holds_lrep_eq)
-      moreover have "l' \<in> set cl" using l'(1) set_remove1_subset by blast
-      ultimately show ?thesis by (rule holds_mem[rotated])
-    next
-      case False
-      with s have "lit_holds e (s, a, b)" by simp
-      with lcl l show ?thesis by (auto intro: holds_mem)
-    qed
-  qed
-qed
+definition lit_atom :: "hterm \<Rightarrow> hterm" where
+  "lit_atom l = (case dest_neg l of Some a \<Rightarrow> a | None \<Rightarrow> l)"
 
-definition equal_proc :: "clause \<Rightarrow> outcome" where
-  "equal_proc = first_step eq_step"
+definition remove_first :: "hterm \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "remove_first x ls =
+     (case find (\<lambda>y. aconv x y) ls of
+        None \<Rightarrow> ls
+      | Some _ \<Rightarrow> (let i = length (takeWhile (\<lambda>y. \<not> aconv x y) ls) in take i ls @ drop (Suc i) ls))"
 
-lemma equal_proc_sound: "sound_out cl (equal_proc cl)"
-  unfolding equal_proc_def by (rule first_step_sound[OF good_eq_step])
+text \<open>@{text embed}: from @{text "\<Gamma> \<turnstile> l"} derive @{text "\<Gamma> \<turnstile> C"} when @{text l} is
+  (alpha-equivalent to) one of the disjuncts of the clause @{text C}.\<close>
 
-section \<open>Process: simplification\<close>
+primrec embed_n :: "nat \<Rightarrow> hthm \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "embed_n 0 th c = (if aconv (concl th) c then Some th else None)"
+| "embed_n (Suc k) th c =
+     (if aconv (concl th) c then Some th
+      else case dest_disj c of
+        None \<Rightarrow> None
+      | Some (a, b) \<Rightarrow>
+          (case embed_n k th a of
+             Some t \<Rightarrow> DISJ1 t b
+           | None \<Rightarrow> (case embed_n k th b of Some t \<Rightarrow> DISJ2 a t | None \<Rightarrow> None)))"
 
-text \<open>Rewrite rules: the recursive definitions of addition and multiplication;
-  then equations between successor/zero terms are decomposed.\<close>
+definition embed :: "hthm \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "embed th c = embed_n (tm_size c) th c"
 
-fun rw :: "trm \<Rightarrow> trm" where
-  "rw (TP TZ y) = y"
-| "rw (TP (TS x) y) = TS (TP x y)"
-| "rw (TM TZ y) = TZ"
-| "rw (TM (TS x) y) = TP y (TM x y)"
-| "rw t = t"
+text \<open>@{text weaken}: from @{text "\<turnstile> C'"}, where every disjunct of @{text C'} is a disjunct
+  of @{text C}, derive @{text "\<turnstile> C"}.\<close>
 
-lemma ev_rw: "ev e (rw t) = ev e t"
-  by (induction t rule: rw.induct) auto
+primrec weaken_n :: "nat \<Rightarrow> hthm \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "weaken_n 0 th c = (if aconv (concl th) c then Some th else embed th c)"
+| "weaken_n (Suc k) th c =
+     (if aconv (concl th) c then Some th
+      else case dest_disj (concl th) of
+        None \<Rightarrow> embed th c
+      | Some (a, b) \<Rightarrow>
+          do { aa \<leftarrow> ASSUME a;
+               ab \<leftarrow> ASSUME b;
+               c1 \<leftarrow> weaken_n k aa c;
+               c2 \<leftarrow> weaken_n k ab c;
+               DISJ_CASES th c1 c2 })"
 
-primrec simp_t :: "trm \<Rightarrow> trm" where
-  "simp_t (TV x) = TV x"
-| "simp_t TZ = TZ"
-| "simp_t (TS t) = TS (simp_t t)"
-| "simp_t (TP a b) = rw (TP (simp_t a) (simp_t b))"
-| "simp_t (TM a b) = rw (TM (simp_t a) (simp_t b))"
+definition weaken :: "hthm \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "weaken th c = weaken_n (tm_size (concl th) + 1) th c"
 
-lemma ev_simp_t: "ev e (simp_t t) = ev e t"
-  by (induction t) (simp_all add: ev_rw)
+definition frees_of_list :: "hterm list \<Rightarrow> hterm list" where
+  "frees_of_list ts = freesl ts"
 
-primrec simp_n :: "nat \<Rightarrow> trm \<Rightarrow> trm" where
-  "simp_n 0 t = t"
-| "simp_n (Suc n) t = simp_n n (simp_t t)"
+section \<open>Clausal form (3.3.1)\<close>
 
-lemma ev_simp_n: "ev e (simp_n n t) = ev e t"
-  by (induction n arbitrary: t) (simp_all add: ev_simp_t)
+primrec build_conj_n :: "nat \<Rightarrow> hterm \<Rightarrow> hthm list \<Rightarrow> (hthm \<times> hthm list) option" where
+  "build_conj_n 0 tm ths = (case ths of t # r \<Rightarrow> Some (t, r) | [] \<Rightarrow> None)"
+| "build_conj_n (Suc k) tm ths =
+     (case dest_conj tm of
+        Some (a, b) \<Rightarrow>
+          do { (ta, r1) \<leftarrow> build_conj_n k a ths;
+               (tb, r2) \<leftarrow> build_conj_n k b r1;
+               t \<leftarrow> CONJ ta tb;
+               Some (t, r2) }
+      | None \<Rightarrow> (case ths of t # r \<Rightarrow> Some (t, r) | [] \<Rightarrow> None))"
 
-fun simp_eq :: "bool \<Rightarrow> trm \<Rightarrow> trm \<Rightarrow> lit list" where
-  "simp_eq s (TS a) (TS b) = simp_eq s a b"
-| "simp_eq s TZ TZ = (if s then [(True, TZ, TZ)] else [])"
-| "simp_eq s (TS a) TZ = (if s then [] else [(True, TZ, TZ)])"
-| "simp_eq s TZ (TS b) = (if s then [] else [(True, TZ, TZ)])"
-| "simp_eq s a b = (if a = b then (if s then [(True, TZ, TZ)] else []) else [(s, a, b)])"
+definition build_conj :: "hterm \<Rightarrow> hthm list \<Rightarrow> hthm option" where
+  "build_conj tm ths = map_option fst (build_conj_n (tm_size tm) tm ths)"
 
-lemma holds_simp_eq: "holds e (simp_eq s a b) = lit_holds e (s, a, b)"
-  by (induction s a b rule: simp_eq.induct) auto
+definition h_clausal :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_clausal cx ind tm =
+     (case cnf_conv tm of
+        None \<Rightarrow> HFail
+      | Some th \<Rightarrow>
+          (case rhs th of
+             None \<Rightarrow> HFail
+           | Some tm' \<Rightarrow>
+               if aconv tm tm' then HFail
+               else if tm' = T_tm then (case EQT_ELIM th of Some r \<Rightarrow> HProved r | None \<Rightarrow> HFail)
+               else HSub (conjuncts tm')
+                      (\<lambda>ths. do { cj \<leftarrow> build_conj tm' ths; sy \<leftarrow> SYM th; EQ_MP sy cj })))"
 
-fun simp_lit :: "lit \<Rightarrow> clause" where
-  "simp_lit (s, a, b) = simp_eq s (simp_n 8 a) (simp_n 8 b)"
+section \<open>Tautology and setify (4.3.1, 4.3.3)\<close>
 
-lemma holds_simp_lit: "holds e (simp_lit l) = lit_holds e l"
-proof -
-  obtain s a b where "l = (s, a, b)" by (rule lit_obtain)
-  then show ?thesis by (simp add: holds_simp_eq ev_simp_n)
-qed
+definition taut_proof :: "hterm \<Rightarrow> hthm option" where
+  "taut_proof tm =
+     (let ls = disjuncts tm in
+      case find (\<lambda>l. case dest_eq l of Some (x, y) \<Rightarrow> aconv x y | None \<Rightarrow> False) ls of
+        Some l \<Rightarrow> (case dest_eq l of Some (x, _) \<Rightarrow> embed (REFL x) tm | None \<Rightarrow> None)
+      | None \<Rightarrow>
+        (if list_ex (aconv T_tm) ls then embed TRUTH tm
+         else
+           (case find (\<lambda>l. list_ex (\<lambda>m. case dest_neg m of Some a \<Rightarrow> aconv a l | None \<Rightarrow> False) ls) ls of
+              None \<Rightarrow> None
+            | Some l \<Rightarrow>
+                do { em \<leftarrow> EXCLUDED_MIDDLE l;
+                     a1 \<leftarrow> ASSUME l;
+                     a2 \<leftarrow> ASSUME (mk_not l);
+                     c1 \<leftarrow> embed a1 tm;
+                     c2 \<leftarrow> embed a2 tm;
+                     DISJ_CASES em c1 c2 })))"
 
-primrec simp_clause :: "clause \<Rightarrow> clause" where
-  "simp_clause [] = []"
-| "simp_clause (l # cl) = simp_lit l @ simp_clause cl"
+definition h_taut :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_taut cx ind tm = (case taut_proof tm of Some th \<Rightarrow> HProved th | None \<Rightarrow> HFail)"
 
-lemma holds_simp_clause: "holds e (simp_clause cl) = holds e cl"
-  by (induction cl) (simp_all add: holds_simp_lit)
+fun dedup_aconv :: "hterm list \<Rightarrow> hterm list" where
+  "dedup_aconv [] = []"
+| "dedup_aconv (x # xs) = x # dedup_aconv (filter (\<lambda>y. \<not> aconv x y) xs)"
 
-definition simp_proc :: "clause \<Rightarrow> outcome" where
-  "simp_proc cl = (let cl' = simp_clause cl in if cl' = cl then Pass else Subgoals [cl'])"
+definition h_setify :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_setify cx ind tm =
+     (let ls = disjuncts tm; ls' = dedup_aconv ls in
+      if length ls' = length ls then HFail
+      else HSub [mk_clause ls'] (\<lambda>ths. case ths of [th] \<Rightarrow> weaken th tm | _ \<Rightarrow> None))"
 
-lemma simp_proc_sound: "sound_out cl (simp_proc cl)"
-  by (auto simp: simp_proc_def Let_def valid_def holds_simp_clause)
+section \<open>Substitution (3.3.2) and equality (3.3.4)\<close>
 
-section \<open>Process: generalization\<close>
+text \<open>Both heuristics use a negated equation @{text "\<not>(a = b)"} of the clause: in the case
+  @{text "a = b"} the remaining literals may be rewritten with it; otherwise the negated
+  equation itself closes the clause.\<close>
 
-fun subs :: "trm \<Rightarrow> trm list" where
-  "subs (TV x) = [TV x]"
-| "subs TZ = [TZ]"
-| "subs (TS t) = TS t # subs t"
-| "subs (TP a b) = TP a b # subs a @ subs b"
-| "subs (TM a b) = TM a b # subs a @ subs b"
+definition neg_eq_parts :: "hterm \<Rightarrow> (hterm \<times> hterm \<times> hterm) option" where
+  "neg_eq_parts l = (case dest_neg l of Some e \<Rightarrow> (case dest_eq e of Some (x, y) \<Rightarrow> Some (e, x, y) | None \<Rightarrow> None) | None \<Rightarrow> None)"
 
-fun lsubs :: "lit \<Rightarrow> trm list" where
-  "lsubs (s, a, b) = subs a @ subs b"
+definition orient :: "bool \<Rightarrow> hterm \<Rightarrow> hthm option" where
+  "orient swap e = do { a \<leftarrow> ASSUME e; if swap then SYM a else Some a }"
 
-definition csubs :: "clause \<Rightarrow> trm list" where
-  "csubs cl = concat (map lsubs cl)"
+text \<open>Given the clause @{text tm}, the literal @{text l} (a negated equation @{text e}) and the
+  oriented hypothesis @{text "{e} \<turnstile> a = b"}: rewrite the rest of the clause.  The justification
+  turns a theorem of the rewritten rest into a theorem of the clause.\<close>
 
-text \<open>Candidates: non-template subterms occurring at least twice in the clause.\<close>
+definition rewrite_rest ::
+  "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> bool \<Rightarrow> bool \<Rightarrow> (hterm list \<times> (hthm list \<Rightarrow> hthm option)) option" where
+  "rewrite_rest tm l e swap keep_lit =
+     (let ls = disjuncts tm; rest_ls = remove_first l ls in
+      if rest_ls = [] then None
+      else
+        let rest = mk_clause rest_ls in
+        do { th_o \<leftarrow> orient swap e;
+             eqr \<leftarrow> replace_conv th_o rest;
+             rest' \<leftarrow> rhs eqr;
+             (let goal = (if keep_lit then mk_disj l rest' else rest') in
+              Some ([goal],
+                    (\<lambda>ths.
+                      case ths of
+                        [th'] \<Rightarrow>
+                          do { sy \<leftarrow> SYM eqr;
+                               c2 \<leftarrow> (let al = ASSUME l in
+                                     do { a_l \<leftarrow> al; embed a_l tm });
+                               em \<leftarrow> EXCLUDED_MIDDLE e;
+                               c1 \<leftarrow> (if keep_lit
+                                     then do { a_l \<leftarrow> ASSUME l;
+                                               cl \<leftarrow> embed a_l tm;
+                                               ar \<leftarrow> ASSUME rest';
+                                               rr \<leftarrow> EQ_MP sy ar;
+                                               cr \<leftarrow> weaken rr tm;
+                                               DISJ_CASES th' cl cr }
+                                     else do { r \<leftarrow> EQ_MP sy th'; weaken r tm });
+                               DISJ_CASES em c1 c2 }
+                      | _ \<Rightarrow> None))) })"
 
-definition gen_cands :: "clause \<Rightarrow> trm list" where
-  "gen_cands cl = [t. t \<leftarrow> csubs cl, \<not> is_tmpl t, 2 \<le> length (filter (\<lambda>u. u = t) (csubs cl))]"
+definition h_subst :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_subst cx ind tm =
+     (let ls = disjuncts tm;
+          cands = List.map_filter
+                    (\<lambda>l. case neg_eq_parts l of
+                           Some (e, x, y) \<Rightarrow>
+                             (if is_var x \<and> x \<notin> set (frees y) then Some (l, e, False)
+                              else if is_var y \<and> y \<notin> set (frees x) then Some (l, e, True)
+                              else None)
+                         | None \<Rightarrow> None) ls;
+          tries = List.map_filter (\<lambda>(l, e, sw). rewrite_rest tm l e sw False) cands
+      in case tries of
+           [] \<Rightarrow> HFail
+         | (gs, j) # _ \<Rightarrow> HSub gs j)"
 
-lemma gen_valid:
-  "valid (crep t (TV (fresh cl)) cl) \<Longrightarrow> valid cl"
-  unfolding valid_def
-proof
-  fix e
-  assume "\<forall>e. holds e (crep t (TV (fresh cl)) cl)"
-  then have "holds (e(fresh cl := ev e t)) (crep t (TV (fresh cl)) cl)" by blast
-  then show "holds e cl" by (simp add: holds_crep_var[OF fresh_notin])
-qed
+definition h_equal :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_equal cx ind tm =
+     (let ls = disjuncts tm;
+          shs = w_shells cx;
+          cands = concat (List.map_filter
+                    (\<lambda>l. case neg_eq_parts l of
+                           Some (e, x, y) \<Rightarrow>
+                             Some ((if \<not> is_var x \<and> \<not> is_template shs x \<and> \<not> aconv x y
+                                    then [(l, e, False)] else []) @
+                                   (if \<not> is_var y \<and> \<not> is_template shs y \<and> \<not> aconv x y
+                                    then [(l, e, True)] else []))
+                         | None \<Rightarrow> None) ls);
+          tries = List.map_filter
+                    (\<lambda>(l, e, sw).
+                       (case rewrite_rest tm l e sw (\<not> ind) of
+                          Some (gs, j) \<Rightarrow>
+                            (case gs of
+                               [g] \<Rightarrow> (if aconv g tm then None else Some (gs, j))
+                             | _ \<Rightarrow> None)
+                        | None \<Rightarrow> None)) cands
+      in case tries of
+           [] \<Rightarrow> HFail
+         | (gs, j) # _ \<Rightarrow> HSub gs j)"
 
-definition gen_proc :: "clause \<Rightarrow> outcome" where
-  "gen_proc cl =
-     (case gen_cands cl of
-        [] \<Rightarrow> Pass
-      | t # _ \<Rightarrow>
-          (let cl' = crep t (TV (fresh cl)) cl
-           in if refuted cl' then Pass else Subgoals [cl']))"
+section \<open>Simplify (3.3.3)\<close>
 
-lemma gen_proc_sound: "sound_out cl (gen_proc cl)"
-proof (cases "gen_cands cl")
-  case Nil
-  then show ?thesis by (simp add: gen_proc_def)
-next
-  case (Cons t ts)
-  have key: "valid (crep t (TV (fresh cl)) cl) \<longrightarrow> valid cl"
-    using gen_valid by blast
-  show ?thesis using Cons key by (auto simp: gen_proc_def Let_def)
-qed
+definition h_simp :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_simp cx ind tm =
+     (case norm (w_rwfuel cx) (w_rules cx @ simp_bool_rules) tm of
+        None \<Rightarrow> HFail
+      | Some th \<Rightarrow>
+          (case rhs th of
+             None \<Rightarrow> HFail
+           | Some tm' \<Rightarrow>
+               if aconv tm tm' then HFail
+               else if tm' = T_tm then (case EQT_ELIM th of Some r \<Rightarrow> HProved r | None \<Rightarrow> HFail)
+               else if tm' = F_tm then HDisproved
+               else HSub [tm'] (\<lambda>ths. case ths of [t] \<Rightarrow> (do { sy \<leftarrow> SYM th; EQ_MP sy t }) | _ \<Rightarrow> None)))"
+
+section \<open>Irrelevance (3.3.6)\<close>
+
+primrec consts_of_n :: "nat \<Rightarrow> hterm \<Rightarrow> string list" where
+  "consts_of_n 0 t = []"
+| "consts_of_n (Suc k) t =
+     (case t of
+        Const n _ \<Rightarrow> [n]
+      | Comb f x \<Rightarrow> consts_of_n k f @ consts_of_n k x
+      | Abs _ b \<Rightarrow> consts_of_n k b
+      | Var _ _ \<Rightarrow> [])"
+
+definition consts_of :: "hterm \<Rightarrow> string list" where
+  "consts_of t = consts_of_n (tm_size t) t"
+
+definition logical_names :: "string list" where
+  "logical_names = [''='', ''NOT'', ''OR'', ''AND'', ''IMP'', ''ALL'', ''T'', ''F'']"
+
+text \<open>Partition literals into groups sharing variables.\<close>
+
+primrec merge_parts_n :: "nat \<Rightarrow> (hterm list \<times> hterm list) list \<Rightarrow> (hterm list \<times> hterm list) list" where
+  "merge_parts_n 0 ps = ps"
+| "merge_parts_n (Suc k) ps =
+     (case ps of
+        [] \<Rightarrow> []
+      | (ls, vs) # rest \<Rightarrow>
+          (let shared = filter (\<lambda>p. list_ex (\<lambda>v. v \<in> set vs) (snd p)) rest;
+               others = filter (\<lambda>p. \<not> list_ex (\<lambda>v. v \<in> set vs) (snd p)) rest
+           in if shared = [] then (ls, vs) # merge_parts_n k others
+              else merge_parts_n k ((ls @ concat (map fst shared), vs @ concat (map snd shared)) # others)))"
+
+definition merge_parts :: "(hterm list \<times> hterm list) list \<Rightarrow> (hterm list \<times> hterm list) list" where
+  "merge_parts ps = merge_parts_n (length ps + 1) ps"
+
+definition lit_is_var_app :: "hterm \<Rightarrow> bool" where
+  "lit_is_var_app l =
+     (case strip_comb (lit_atom l) of
+        (Const n _, args) \<Rightarrow> n \<notin> set logical_names \<and> args \<noteq> [] \<and> list_all is_var args
+      | _ \<Rightarrow> False)"
+
+definition h_irrel :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> hres" where
+  "h_irrel cx ind tm =
+     (let ls = disjuncts tm;
+          shs = w_shells cx;
+          shell_names = concat (map (\<lambda>sh. shell_con_names sh @ shell_acc_names sh) shs) @ logical_names;
+          parts = merge_parts (map (\<lambda>l. ([l], frees l)) ls);
+          irrelevant = (\<lambda>p. list_all (\<lambda>l. list_all (\<lambda>n. n \<in> set shell_names) (consts_of l)) (fst p)
+                            \<or> list_ex lit_is_var_app (fst p));
+          keep = filter (\<lambda>p. \<not> irrelevant p) parts
+      in if length keep = length parts then HFail
+         else if keep = [] then HDisproved
+         else
+           let ls' = concat (map fst keep) in
+           HSub [mk_clause ls']
+                (\<lambda>ths. case ths of [th] \<Rightarrow> weaken th tm | _ \<Rightarrow> None))"
+
+
+section \<open>Counterexample checker (4.4.3)\<close>
+
+definition rnd :: "nat \<Rightarrow> nat" where
+  "rnd s = (s * 1103515245 + 12345) mod 2147483648"
+
+definition pick :: "nat \<Rightarrow> 'a list \<Rightarrow> 'a option" where
+  "pick k xs = (if xs = [] then None else Some (xs ! (k mod length xs)))"
+
+text \<open>Random ground values of a shell type, built from its constructors.  The probability of
+  choosing a bottom object grows as the depth bound is approached.\<close>
+
+primrec gen_val_n :: "nat \<Rightarrow> shell \<Rightarrow> nat \<Rightarrow> hterm option \<times> nat" where
+  "gen_val_n 0 sh seed = (pick (rnd seed div 65536) (sh_bottoms sh), rnd seed)"
+| "gen_val_n (Suc d) sh seed =
+     (let s1 = rnd seed; k = s1 div 65536 in
+      if k mod (d + 2) = 0 \<or> sh_cons sh = [] then (pick k (sh_bottoms sh), s1)
+      else
+        (case pick k (sh_cons sh) of
+           None \<Rightarrow> (None, s1)
+         | Some c \<Rightarrow>
+             (let tys = type_of_args (type_of c) in
+              case foldl (\<lambda>acc ty.
+                            case acc of
+                              (None, s) \<Rightarrow> (None, s)
+                            | (Some args, s) \<Rightarrow>
+                                if ty = sh_ty sh
+                                then (case gen_val_n d sh s of
+                                        (Some a, s') \<Rightarrow> (Some (args @ [a]), s')
+                                      | (None, s') \<Rightarrow> (None, s'))
+                                else (None, s)) (Some [], s1) tys of
+                (Some args, s2) \<Rightarrow> (list_mk_comb c args, s2)
+              | (None, s2) \<Rightarrow> (None, s2))))"
+
+definition shell_of_type :: "shell list \<Rightarrow> hol_type \<Rightarrow> shell option" where
+  "shell_of_type shs ty = find (\<lambda>sh. sh_ty sh = ty) shs"
+
+definition ground_clause ::
+  "wctx \<Rightarrow> hterm \<Rightarrow> nat \<Rightarrow> (hterm option \<times> nat)" where
+  "ground_clause cx tm seed =
+     (let vs = frees tm;
+          r = foldl (\<lambda>acc v.
+                       case acc of
+                         (None, s) \<Rightarrow> (None, s)
+                       | (Some th, s) \<Rightarrow>
+                           (case shell_of_type (w_shells cx) (type_of v) of
+                              None \<Rightarrow> (None, s)
+                            | Some sh \<Rightarrow>
+                                (case gen_val_n 4 sh s of
+                                   (Some t, s') \<Rightarrow> (Some (th @ [(t, v)]), s')
+                                 | (None, s') \<Rightarrow> (None, s')))) (Some [], seed) vs
+      in case r of
+           (Some theta, s) \<Rightarrow> (vsubst_checked theta tm, s)
+         | (None, s) \<Rightarrow> (None, s))"
+
+text \<open>A clause is refuted (or rejected as unsafe to generalize to) if some random ground
+  instance does not evaluate to @{text T}; as in the paper, a ground clause that cannot be
+  decided by the rewrite rules is also treated as unsafe.\<close>
+
+primrec cex_check :: "nat \<Rightarrow> wctx \<Rightarrow> hterm \<Rightarrow> nat \<Rightarrow> bool \<times> nat" where
+  "cex_check 0 cx tm seed = (False, seed)"
+| "cex_check (Suc k) cx tm seed =
+     (case ground_clause cx tm seed of
+        (None, s) \<Rightarrow> (True, s)
+      | (Some g, s) \<Rightarrow>
+          (case norm (w_rwfuel cx) (w_rules cx @ simp_bool_rules) g of
+             Some th \<Rightarrow>
+               (case rhs th of
+                  Some r \<Rightarrow> if r = T_tm then cex_check k cx tm s else (True, s)
+                | None \<Rightarrow> (True, s))
+           | None \<Rightarrow> (True, s)))"
+
+definition unsafe_to_generalize :: "wctx \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> bool \<times> wst" where
+  "unsafe_to_generalize cx tm st =
+     (case cex_check (w_ncex cx) cx tm (w_seed st) of
+        (b, s) \<Rightarrow> (b, st\<lparr> w_seed := s \<rparr>))"
+
+section \<open>Generalization (3.3.5, 4.4.1)\<close>
+
+primrec subs_n :: "nat \<Rightarrow> hterm \<Rightarrow> hterm list" where
+  "subs_n 0 t = [t]"
+| "subs_n (Suc k) t = t # concat (map (\<lambda>a. subs_n k a) (snd (strip_comb t)))"
+
+definition subs :: "hterm \<Rightarrow> hterm list" where
+  "subs t = subs_n (tm_size t) t"
+
+definition lit_roots :: "hterm \<Rightarrow> hterm list" where
+  "lit_roots l =
+     (let a = lit_atom l in
+      case dest_eq a of Some (x, y) \<Rightarrow> [x, y] | None \<Rightarrow> snd (strip_comb a))"
+
+definition gen_ok :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> bool" where
+  "gen_ok cx ad t =
+     (let shs = w_shells cx in
+      \<not> is_var t \<and> \<not> is_template shs t \<and> \<not> is_accessor_app shs t
+      \<and> (case t of Comb _ _ \<Rightarrow> True | _ \<Rightarrow> False)
+      \<and> (\<not> ad \<or> \<not> has_constructor shs t))"
+
+definition gen_terms :: "wctx \<Rightarrow> bool \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "gen_terms cx ad ls = filter (gen_ok cx ad) (concat (map subs (concat (map lit_roots ls))))"
+
+definition count_in :: "hterm \<Rightarrow> hterm list \<Rightarrow> nat" where
+  "count_in g us = length (filter (\<lambda>u. g \<in> set (subs u)) us)"
+
+definition occ_count :: "hterm \<Rightarrow> hterm list \<Rightarrow> nat" where
+  "occ_count g ts = length (filter (\<lambda>u. u = g) ts)"
+
+definition on_both_sides :: "hterm \<Rightarrow> hterm list \<Rightarrow> bool" where
+  "on_both_sides g ls =
+     list_ex (\<lambda>l. case dest_eq (lit_atom l) of
+                    Some (x, y) \<Rightarrow> g \<in> set (subs x) \<and> g \<in> set (subs y)
+                  | None \<Rightarrow> False) ls"
+
+definition twice_on_a_side :: "hterm \<Rightarrow> hterm list \<Rightarrow> bool" where
+  "twice_on_a_side g ls =
+     list_ex (\<lambda>l. case dest_eq (lit_atom l) of
+                    Some (x, y) \<Rightarrow> occ_count g (subs x) \<ge> 2 \<or> occ_count g (subs y) \<ge> 2
+                  | None \<Rightarrow> False) ls"
+
+text \<open>Candidates by the common subterm criterion: a generalizable term is a candidate if it
+  appears in more than one generalizable subterm, or on both sides of an equation or negated
+  equation.  Aderhold's variant additionally requires the equation criterion for terms of
+  equations.  Minimal candidates have no other candidate as a proper subterm.\<close>
+
+definition gen_cands :: "wctx \<Rightarrow> bool \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "gen_cands cx ad ls =
+     (let gts = gen_terms cx ad ls;
+          cs0 = filter (\<lambda>g. count_in g gts \<ge> 2 \<or> on_both_sides g ls) (dedup_aconv gts);
+          cs1 = (if ad then filter (\<lambda>g. on_both_sides g ls \<or> twice_on_a_side g ls
+                                        \<or> \<not> list_ex (\<lambda>l. case dest_eq (lit_atom l) of
+                                                           Some (x, y) \<Rightarrow> g \<in> set (subs x) \<or> g \<in> set (subs y)
+                                                         | None \<Rightarrow> False) ls) cs0
+                 else cs0)
+      in filter (\<lambda>c. \<not> list_ex (\<lambda>c'. \<not> aconv c c' \<and> c' \<in> set (tl (subs c))) cs1) cs1)"
+
+primrec rep_tm :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "rep_tm a b (Var n ty) = (if Var n ty = a then b else Var n ty)"
+| "rep_tm a b (Const n ty) = (if Const n ty = a then b else Const n ty)"
+| "rep_tm a b (Comb s t) = (if Comb s t = a then b else Comb (rep_tm a b s) (rep_tm a b t))"
+| "rep_tm a b (Abs v t) = (if Abs v t = a then b else Abs v (rep_tm a b t))"
+
+definition rep_pairs :: "(hterm \<times> hterm) list \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "rep_pairs ps tm = foldl (\<lambda>acc p. rep_tm (fst p) (snd p) acc) tm ps"
+
+text \<open>Fresh variables for the selected terms.\<close>
+
+definition fresh_vars :: "hterm list \<Rightarrow> hterm list \<Rightarrow> (hterm \<times> hterm) list" where
+  "fresh_vars avoid gs =
+     snd (foldl (\<lambda>(av, acc) g.
+                   (let v = variant av (Var ''n'' (type_of g)) in (v # av, acc @ [(g, v)])))
+                (avoid, []) gs)"
+
+text \<open>Generalization lemmas @{text "(\<turnstile> P, pattern)"}: if the generalized term is an instance of
+  the pattern, the corresponding instance of the lemma is added as a hypothesis.\<close>
+
+definition inst_by_match :: "hterm \<Rightarrow> hterm \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "inst_by_match pat tm th =
+     do { (tye, tme) \<leftarrow> match_tm pat tm ([], []);
+          th1 \<leftarrow> INST_TYPE tye th;
+          INST (map (\<lambda>p. (fst p, (case snd p of Var n ty \<Rightarrow> Var n (type_subst tye ty) | v \<Rightarrow> v))) tme) th1 }"
+
+definition lemma_instances :: "wctx \<Rightarrow> hterm list \<Rightarrow> hthm list" where
+  "lemma_instances cx gs =
+     concat (map (\<lambda>g. List.map_filter (\<lambda>(lth, pat). inst_by_match pat g lth) (w_glemmas cx)) gs)"
+
+fun elim_lemmas :: "hthm list \<Rightarrow> hthm \<Rightarrow> hthm option" where
+  "elim_lemmas [] cur = Some cur"
+| "elim_lemmas (lth # ls) cur =
+     (case dest_disj (concl cur) of
+        None \<Rightarrow> None
+      | Some (np, r) \<Rightarrow>
+          do { a \<leftarrow> ASSUME np;
+               n \<leftarrow> NOT_ELIM a;
+               f \<leftarrow> MP n lth;
+               c1 \<leftarrow> CONTR r f;
+               c2 \<leftarrow> ASSUME r;
+               nxt \<leftarrow> DISJ_CASES cur c1 c2;
+               elim_lemmas ls nxt })"
+
+definition gen_goal_and_just ::
+  "wctx \<Rightarrow> hterm \<Rightarrow> (hterm \<times> hterm) list \<Rightarrow> (hterm \<times> (hthm list \<Rightarrow> hthm option))" where
+  "gen_goal_and_just cx tm pairs =
+     (let gs = map fst pairs;
+          cl' = rep_pairs pairs tm;
+          lems = lemma_instances cx gs;
+          nots = map (\<lambda>l. mk_not (rep_pairs pairs (concl l))) lems;
+          goal = foldr mk_disj nots cl'
+      in (goal,
+          (\<lambda>ths. case ths of
+                   [th] \<Rightarrow> do { th1 \<leftarrow> INST pairs th;
+                               th2 \<leftarrow> elim_lemmas lems th1;
+                               if aconv (concl th2) tm then Some th2 else None }
+                 | _ \<Rightarrow> None)))"
+
+definition h_gen :: "bool \<Rightarrow> wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hres \<times> wst" where
+  "h_gen ad cx ind tm st =
+     (let ls = disjuncts tm;
+          cands = filter (\<lambda>g. \<not> list_ex (aconv g) (w_gened st)) (gen_cands cx ad ls);
+          sel = (if ad
+                 then (case cands of
+                         [] \<Rightarrow> []
+                       | c # cs \<Rightarrow> [foldl (\<lambda>b g. if count_in g (gen_terms cx ad ls) > count_in b (gen_terms cx ad ls) then g else b) c cs])
+                 else cands)
+      in if sel = [] then (HFail, st)
+         else
+           (let pairs = fresh_vars (frees tm) sel;
+                (goal, just) = gen_goal_and_just cx tm pairs
+            in case unsafe_to_generalize cx goal st of
+                 (True, st1) \<Rightarrow> (HFail, st1\<lparr> w_overs := w_overs st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)
+               | (False, st1) \<Rightarrow>
+                   (HSub [goal] just,
+                    st1\<lparr> w_gens := w_gens st1 + 1, w_gened := sel @ w_gened st1 \<rparr>)))"
+
+section \<open>Generalizing variables apart (4.4.2)\<close>
+
+definition rec_positions :: "hthm list \<Rightarrow> shell list \<Rightarrow> (string \<times> nat list) list" where
+  "rec_positions rules shs =
+     (let rs = List.map_filter (\<lambda>th. case strip_conds (concl th) of (_, e) \<Rightarrow> map_option fst (dest_eq e)) rules
+      in map (\<lambda>n. (n, remdups (concat (map (\<lambda>l. case strip_comb l of
+                                                  (Const m _, args) \<Rightarrow>
+                                                    (if m = n then
+                                                       List.map_filter (\<lambda>(i, a). if (case strip_comb a of (Const c _, _) \<Rightarrow> is_con_name shs c | _ \<Rightarrow> False) then Some i else None)
+                                                         (zip [0..<length args] args)
+                                                     else [])
+                                                | _ \<Rightarrow> []) rs))))
+           (remdups (List.map_filter (\<lambda>l. case strip_comb l of (Const m _, _ # _) \<Rightarrow> Some m | _ \<Rightarrow> None) rs)))"
+
+primrec replace_path :: "nat list \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> hterm" where
+  "replace_path [] new t = new"
+| "replace_path (i # rest) new t =
+     (case strip_comb t of
+        (h, args) \<Rightarrow>
+          (if i < length args
+           then foldl Comb h (take i args @ [replace_path rest new (args ! i)] @ drop (Suc i) args)
+           else t))"
+
+primrec apps_n :: "nat \<Rightarrow> nat list \<Rightarrow> hterm \<Rightarrow> (nat list \<times> string \<times> hterm list) list" where
+  "apps_n 0 path t = []"
+| "apps_n (Suc k) path t =
+     (case strip_comb t of
+        (Const f _, args) \<Rightarrow>
+          (if args = [] then []
+           else (path, f, args) #
+                concat (map (\<lambda>(i, a). apps_n k (path @ [i]) a) (zip [0..<length args] args)))
+      | (_, args) \<Rightarrow> concat (map (\<lambda>(i, a). apps_n k (path @ [i]) a) (zip [0..<length args] args)))"
+
+text \<open>Rebuild a literal from new roots.\<close>
+
+definition lit_with_roots :: "hterm \<Rightarrow> hterm list \<Rightarrow> hterm" where
+  "lit_with_roots l roots =
+     (let a = lit_atom l;
+          a' = (case dest_eq a of
+                  Some _ \<Rightarrow> (case roots of [x, y] \<Rightarrow> safe_mk_eq x y | _ \<Rightarrow> a)
+                | None \<Rightarrow> (case strip_comb a of (h, _) \<Rightarrow> foldl Comb h roots))
+      in (case dest_neg l of Some _ \<Rightarrow> mk_not a' | None \<Rightarrow> a'))"
+
+definition h_apart :: "wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hres \<times> wst" where
+  "h_apart cx ind tm st =
+     (let ls = disjuncts tm;
+          rp = rec_positions (w_rules cx) (w_shells cx);
+          rts = concat (map (\<lambda>(li, l). map (\<lambda>(ri, r). (li, ri, r)) (zip [0..<length (lit_roots l)] (lit_roots l)))
+                            (zip [0..<length ls] ls));
+          occs = concat (map (\<lambda>(li, ri, r). map (\<lambda>(p, f, args). (li, ri, p, f, args)) (apps_n (tm_size r) [] r)) rts);
+          props = concat (map (\<lambda>o1.
+                    concat (map (\<lambda>o2.
+                      (case (o1, o2) of
+                         ((li1, ri1, p1, f1, a1), (li2, ri2, p2, f2, a2)) \<Rightarrow>
+                           (if f1 = f2 \<and> (li1, ri1, p1) \<noteq> (li2, ri2, p2) then
+                              (case map_of rp f1 of
+                                 None \<Rightarrow> []
+                               | Some rps \<Rightarrow>
+                                   concat (map (\<lambda>i. concat (map (\<lambda>j.
+                                     (if i \<in> set rps \<and> j \<notin> set rps \<and> i < length a1 \<and> j < length a2
+                                         \<and> is_var (a1 ! i) \<and> a1 ! i = a2 ! j
+                                      then [(a1 ! i, (li1, ri1, p1 @ [i]), (li2, ri2, p2 @ [j]))] else []))
+                                     [0..<length a2])) [0..<length a1]))
+                            else []))) occs)) occs)
+      in case props of
+           [] \<Rightarrow> (HFail, st)
+         | (v, (l1, r1, q1), (l2, r2, q2)) # _ \<Rightarrow>
+             (let v' = variant (frees tm) (Var ''n'' (type_of v));
+                  upd = (\<lambda>li ri r.
+                           (if (li, ri) = (l1, r1) then replace_path q1 v' r else r))
+                  ; roots_new = (\<lambda>li l. map (\<lambda>ri. let r = lit_roots l ! ri in
+                                                  let r1' = (if (li, ri) = (l1, r1) then replace_path q1 v' r else r) in
+                                                  if (li, ri) = (l2, r2) then replace_path q2 v' (if (li, ri) = (l1, r1) then r1' else r) else r1')
+                                  [0..<length (lit_roots l)])
+                  ; ls' = map (\<lambda>(li, l). lit_with_roots l (roots_new li l)) (zip [0..<length ls] ls);
+                  goal = mk_clause ls'
+              in case unsafe_to_generalize cx goal st of
+                   (True, st1) \<Rightarrow> (HFail, st1\<lparr> w_overs := w_overs st1 + 1 \<rparr>)
+                 | (False, st1) \<Rightarrow>
+                     (HSub [goal] (\<lambda>ths. case ths of
+                                           [th] \<Rightarrow> (do { t1 \<leftarrow> INST [(v, v')] th;
+                                                        if aconv (concl t1) tm then Some t1 else None })
+                                         | _ \<Rightarrow> None),
+                      st1\<lparr> w_gens := w_gens st1 + 1 \<rparr>)))"
+
+
+section \<open>Induction (3.1, 3.2)\<close>
+
+definition shell_for_var :: "shell list \<Rightarrow> hterm \<Rightarrow> (shell \<times> tyenv) option" where
+  "shell_for_var shs x =
+     (case List.map_filter (\<lambda>sh. map_option (\<lambda>e. (sh, e)) (match_ty (sh_ty sh) (type_of x) [])) shs of
+        [] \<Rightarrow> None
+      | r # _ \<Rightarrow> Some r)"
+
+definition ind_score :: "(string \<times> nat list) list \<Rightarrow> hterm list \<Rightarrow> hterm \<Rightarrow> nat" where
+  "ind_score rp ls v =
+     length (filter (\<lambda>(p, f, args). case map_of rp f of
+                                      None \<Rightarrow> False
+                                    | Some rps \<Rightarrow> list_ex (\<lambda>i. i < length args \<and> args ! i = v) rps)
+                    (concat (map (\<lambda>r. apps_n (tm_size r) [] r) (concat (map lit_roots ls)))))"
+
+primrec vars_ord :: "hterm \<Rightarrow> hterm list" where
+  "vars_ord (Var n ty) = [Var n ty]"
+| "vars_ord (Const n ty) = []"
+| "vars_ord (Comb s t) = vars_ord s @ vars_ord t"
+| "vars_ord (Abs v b) = filter (\<lambda>x. x \<noteq> v) (vars_ord b)"
+
+definition choose_ind_var :: "wctx \<Rightarrow> hterm \<Rightarrow> hterm option" where
+  "choose_ind_var cx tm =
+     (let ls = disjuncts tm;
+          rp = rec_positions (w_rules cx) (w_shells cx);
+          vs = filter (\<lambda>v. shell_for_var (w_shells cx) v \<noteq> None) (dedup_aconv (vars_ord tm))
+      in case vs of
+           [] \<Rightarrow> None
+         | v0 # rest \<Rightarrow>
+             Some (foldl (\<lambda>b v. if ind_score rp ls v > ind_score rp ls b then v else b) v0 rest))"
+
+fun strip_foralls_n :: "nat \<Rightarrow> hterm \<Rightarrow> hterm list \<times> hterm" where
+  "strip_foralls_n 0 tm = ([], tm)"
+| "strip_foralls_n (Suc k) tm =
+     (case dest_forall tm of
+        Some (v, b) \<Rightarrow> (case strip_foralls_n k b of (vs, body) \<Rightarrow> (v # vs, body))
+      | None \<Rightarrow> ([], tm))"
+
+definition strip_foralls :: "hterm \<Rightarrow> hterm list \<times> hterm" where
+  "strip_foralls tm = strip_foralls_n (tm_size tm) tm"
+
+definition fresh_list :: "hterm list \<Rightarrow> hterm list \<Rightarrow> hterm list" where
+  "fresh_list avoid vs =
+     snd (foldl (\<lambda>(av, acc) v. (let v' = variant av v in (v' # av, acc @ [v']))) (avoid, []) vs)"
+
+text \<open>Induction with the shell's induction theorem: the base cases and step cases are the
+  conjuncts of its antecedent after instantiating the predicate with the abstracted clause
+  and beta-reducing.  Step cases (those with an induction hypothesis) are flagged, so that
+  the equality heuristic may cross-fertilize.\<close>
+
+definition induct_prep ::
+  "wctx \<Rightarrow> hterm \<Rightarrow> hterm \<Rightarrow> ((hterm \<times> bool) list \<times> (hthm list \<Rightarrow> hthm option)) option" where
+  "induct_prep cx tm x =
+     do { (sh, tye) \<leftarrow> shell_for_var (w_shells cx) x;
+          th0 \<leftarrow> INST_TYPE tye (sh_induct sh);
+          th1 \<leftarrow> SPEC (Abs x tm) th0;
+          th2 \<leftarrow> CONV_RULE beta_all th1;
+          (a, _) \<leftarrow> dest_imp (concl th2);
+          let cases = conjuncts a;
+          let avoid = frees tm;
+          let info = map (\<lambda>c. (case strip_foralls c of
+                                 (vs, _) \<Rightarrow> let vs' = fresh_list avoid vs in (c, vs'))) cases;
+          goals \<leftarrow> those (map (\<lambda>(c, vs'). do { ac \<leftarrow> ASSUME c;
+                                               sp \<leftarrow> SPECL vs' ac;
+                                               Some (concl sp) }) info);
+          Some (map (\<lambda>g. (g, dest_imp g \<noteq> None)) goals,
+                (\<lambda>ths. do { gens \<leftarrow> those (map (\<lambda>((c, vs'), th). GENL vs' th) (zip info ths));
+                            cj \<leftarrow> build_conj a gens;
+                            m \<leftarrow> MP th2 cj;
+                            SPEC x m })) }"
 
 section \<open>The waterfall\<close>
 
-datatype process = P_Taut | P_Counter | P_Subst | P_Simp | P_Equal | P_Gen
+definition run_heur :: "heur \<Rightarrow> wctx \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hres \<times> wst" where
+  "run_heur h cx ind tm st =
+     (case h of
+        H_Clausal \<Rightarrow> (h_clausal cx ind tm, st)
+      | H_Taut \<Rightarrow> (h_taut cx ind tm, st)
+      | H_Setify \<Rightarrow> (h_setify cx ind tm, st)
+      | H_Subst \<Rightarrow> (h_subst cx ind tm, st)
+      | H_Simp \<Rightarrow> (h_simp cx ind tm, st)
+      | H_Equal \<Rightarrow> (h_equal cx ind tm, st)
+      | H_GenBM \<Rightarrow> h_gen False cx ind tm st
+      | H_GenAd \<Rightarrow> h_gen True cx ind tm st
+      | H_GenApart \<Rightarrow> h_apart cx ind tm st
+      | H_Irrel \<Rightarrow> (h_irrel cx ind tm, st))"
 
-fun run :: "process \<Rightarrow> clause \<Rightarrow> outcome" where
-  "run P_Taut cl = taut_proc cl"
-| "run P_Counter cl = counter_proc cl"
-| "run P_Subst cl = subst_proc cl"
-| "run P_Simp cl = simp_proc cl"
-| "run P_Equal cl = equal_proc cl"
-| "run P_Gen cl = gen_proc cl"
+text \<open>The warehouse filter: a heuristic that already succeeded on the same clause in this
+  waterfall is skipped, to avoid loops.\<close>
 
-lemma run_sound: "sound_out cl (run p cl)"
-  by (cases p)
-     (simp_all add: taut_proc_sound counter_proc_sound subst_proc_sound
-                    simp_proc_sound equal_proc_sound gen_proc_sound)
+primrec run_pipe ::
+  "heur list \<Rightarrow> wctx \<Rightarrow> (hterm \<times> heur) list \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> (heur \<times> hres) option \<times> wst" where
+  "run_pipe [] cx wh ind tm st = (None, st)"
+| "run_pipe (h # hs) cx wh ind tm st =
+     (if list_ex (\<lambda>p. aconv (fst p) tm \<and> snd p = h) wh then run_pipe hs cx wh ind tm st
+      else
+        (case run_heur h cx ind tm st of
+           (HFail, st') \<Rightarrow> run_pipe hs cx wh ind tm st'
+         | (r, st') \<Rightarrow> (Some (h, r), st')))"
 
-text \<open>A waterfall is an ordered list of processes; a clause flows down until a
-  process does something with it.\<close>
+primrec var_depth_n :: "nat \<Rightarrow> hterm \<Rightarrow> nat" where
+  "var_depth_n 0 t = 0"
+| "var_depth_n (Suc k) t =
+     (case strip_comb t of
+        (_, args) \<Rightarrow> foldl max 0 (map (\<lambda>a. if frees a = [] then 0 else Suc (var_depth_n k a)) args))"
 
-fun pipeline :: "process list \<Rightarrow> clause \<Rightarrow> outcome" where
-  "pipeline [] cl = Pass"
-| "pipeline (p # ps) cl = (case run p cl of Pass \<Rightarrow> pipeline ps cl | o \<Rightarrow> o)"
+definition clause_depth :: "hterm \<Rightarrow> nat" where
+  "clause_depth tm =
+     foldl max 0 (map (\<lambda>r. var_depth_n (tm_size r) r) (concat (map lit_roots (disjuncts tm))))"
 
-lemma pipeline_sound: "sound_out cl (pipeline ps cl)"
-proof (induction ps)
-  case Nil
-  then show ?case by simp
-next
-  case (Cons p ps)
-  have "sound_out cl (run p cl)" by (rule run_sound)
-  then show ?case using Cons.IH by (cases "run p cl") auto
-qed
+definition pour_all ::
+  "((hterm \<times> bool) \<Rightarrow> wst \<Rightarrow> hthm option \<times> wst) \<Rightarrow> (hterm \<times> bool) list \<Rightarrow> wst \<Rightarrow> hthm list option \<times> wst" where
+  "pour_all f gs st =
+     foldl (\<lambda>(acc, s) g.
+              case acc of
+                None \<Rightarrow> (None, s)
+              | Some ths \<Rightarrow> (case f g s of
+                              (Some th, s') \<Rightarrow> (Some (ths @ [th]), s')
+                            | (None, s') \<Rightarrow> (None, s')))
+           (Some [], st) gs"
 
-definition default_waterfall :: "process list" where
-  "default_waterfall = [P_Taut, P_Subst, P_Simp, P_Equal, P_Gen]"
+primrec pour ::
+  "nat \<Rightarrow> wctx \<Rightarrow> (hterm \<times> heur) list \<Rightarrow> hterm list \<Rightarrow> bool \<Rightarrow> hterm \<Rightarrow> wst \<Rightarrow> hthm option \<times> wst" where
+  "pour 0 cx wh ih ind tm st = (None, add_note ''  (out of fuel)'' st)"
+| "pour (Suc n) cx wh ih ind tm st =
+     (let st1 = add_note (pp_tm tm) (st\<lparr> w_steps := w_steps st + 1 \<rparr>) in
+      if clause_depth tm > w_maxdepth cx then (None, add_note ''-> maximum depth exceeded'' st1)
+      else
+        (case run_pipe (w_order cx) cx wh ind tm st1 of
+           (Some (h, res), st2) \<Rightarrow>
+             (case res of
+                HProved th \<Rightarrow> (Some th, add_note (''-> '' @ pp_heur h @ '' (proved)'') st2)
+              | HDisproved \<Rightarrow> (None, add_note (''-> '' @ pp_heur h @ '' (disproved)'') st2)
+              | HFail \<Rightarrow> (None, st2)
+              | HSub gs just \<Rightarrow>
+                  (case pour_all (\<lambda>p s. pour n cx ((tm, h) # wh) ih ind (fst p) s)
+                                 (map (\<lambda>g. (g, ind)) gs)
+                                 (add_note (''-> '' @ pp_heur h) st2) of
+                     (Some ths, st3) \<Rightarrow> (just ths, st3)
+                   | (None, st3) \<Rightarrow> (None, st3)))
+         | (None, st2) \<Rightarrow>
+             (if list_ex (aconv tm) ih then (None, add_note ''-> induction already applied'' st2)
+              else
+                (case choose_ind_var cx tm of
+                   None \<Rightarrow> (None, add_note ''-> no induction variable'' st2)
+                 | Some x \<Rightarrow>
+                     (case induct_prep cx tm x of
+                        None \<Rightarrow> (None, add_note ''-> induction failed'' st2)
+                      | Some (gs, just) \<Rightarrow>
+                          (case pour_all (\<lambda>p s. pour n cx [] (tm # ih) (snd p) (fst p) s) gs
+                                 (add_note (''Doing induction on: '' @ pp_tm x) (st2\<lparr> w_inds := w_inds st2 + 1 \<rparr>)) of
+                             (Some ths, st3) \<Rightarrow> (just ths, st3)
+                           | (None, st3) \<Rightarrow> (None, st3)))))))"
 
-section \<open>Induction\<close>
+definition bm_prove :: "wctx \<Rightarrow> nat \<Rightarrow> hterm \<Rightarrow> hthm option \<times> wst" where
+  "bm_prove cx fuel goal =
+     (case strip_foralls goal of
+        (vs, body) \<Rightarrow>
+          (case pour fuel cx [] [] False body init_wst of
+             (Some th, st) \<Rightarrow> (GENL vs th, st)
+           | (None, st) \<Rightarrow> (None, st)))"
 
-text \<open>Induction on a variable x of the clause: base case x := 0, and for every
-  literal l of the clause one step clause  c[x := S y] \<or> \<not> l[x := y]  with y fresh.\<close>
+definition bm_order :: "heur list" where
+  "bm_order = [H_Clausal, H_Subst, H_Simp, H_Equal, H_GenBM, H_Irrel]"
 
-fun neg :: "lit \<Rightarrow> lit" where
-  "neg (s, a, b) = (\<not> s, a, b)"
+definition bme_order :: "heur list" where
+  "bme_order = [H_Clausal, H_Taut, H_Subst, H_Simp, H_Setify, H_Equal, H_GenBM, H_Irrel]"
 
-lemma lit_holds_neg: "lit_holds e (neg l) = (\<not> lit_holds e l)"
-proof -
-  obtain s a b where "l = (s, a, b)" by (rule lit_obtain)
-  then show ?thesis by auto
-qed
+definition bmf_order :: "heur list" where
+  "bmf_order = [H_Clausal, H_Taut, H_Subst, H_Simp, H_Setify, H_Equal, H_GenAd, H_GenApart, H_Irrel]"
 
-definition step_clause :: "nat \<Rightarrow> clause \<Rightarrow> lit \<Rightarrow> clause" where
-  "step_clause x cl l =
-     csubst x (TS (TV (fresh cl))) cl @ [neg (lsubst x (TV (fresh cl)) l)]"
+section \<open>Peano arithmetic: a shell for the natural numbers\<close>
 
-definition ind_goals :: "nat \<Rightarrow> clause \<Rightarrow> clause list" where
-  "ind_goals x cl = csubst x TZ cl # map (step_clause x cl) cl"
+definition num_ty :: hol_type where "num_ty = Tyapp ''num'' []"
+definition num1 :: "hol_type" where "num1 = fun_ty num_ty num_ty"
+definition num2 :: "hol_type" where "num2 = fun_ty num_ty (fun_ty num_ty num_ty)"
+definition zero_c :: hterm where "zero_c = Const ''0'' num_ty"
+definition suc_c :: hterm where "suc_c = Const ''SUC'' num1"
+definition pre_c :: hterm where "pre_c = Const ''PRE'' num1"
+definition add_c :: hterm where "add_c = Const ''+'' num2"
+definition mul_c :: hterm where "mul_c = Const ''*'' num2"
 
-lemma ind_sound:
-  assumes xn: "x \<in> set (cvars cl)" and goals: "\<forall>c\<in>set (ind_goals x cl). valid c"
-  shows "valid cl"
-proof -
-  let ?y = "fresh cl"
-  have hy: "?y \<notin> set (cvars cl)" by (rule fresh_notin)
-  have base: "valid (csubst x TZ cl)" using goals by (simp add: ind_goals_def)
-  have step: "\<And>l. l \<in> set cl \<Longrightarrow> valid (step_clause x cl l)"
-    using goals by (auto simp: ind_goals_def)
-  have main: "\<And>e n. holds (e(x := n)) cl"
-  proof -
-    fix e n
-    show "holds (e(x := n)) cl"
-    proof (induction n)
-      case 0
-      have "holds e (csubst x TZ cl)" using base unfolding valid_def by blast
-      then show ?case by (simp add: holds_csubst)
-    next
-      case (Suc n)
-      from Suc.IH obtain l where l: "l \<in> set cl" "lit_holds (e(x := n)) l"
-        by (auto simp: holds_def)
-      let ?e' = "(e(x := n))(?y := n)"
-      have hs: "holds ?e' (step_clause x cl l)"
-        using step[OF l(1)] unfolding valid_def by blast
-      have vl: "\<And>v. v \<in> set (lvars l) \<Longrightarrow> v \<noteq> ?y"
-        using hy lvars_cvars[OF l(1)] by blast
-      have c1: "lit_holds (?e'(x := n)) l = lit_holds (e(x := n)) l"
-        by (rule lit_holds_cong) (auto simp: fun_upd_apply dest: vl)
-      have negfalse: "\<not> lit_holds ?e' (neg (lsubst x (TV ?y) l))"
-        using l(2) c1 by (simp add: lit_holds_neg lit_holds_lsubst)
-      have hc: "holds ?e' (csubst x (TS (TV ?y)) cl)"
-        using hs negfalse by (auto simp: step_clause_def)
-      have c2: "holds (?e'(x := Suc n)) cl = holds (e(x := Suc n)) cl"
-        by (rule holds_cong) (auto simp: fun_upd_apply dest: hy)
-      show ?case using hc c2 by (simp add: holds_csubst)
-    qed
-  qed
-  show ?thesis
-    unfolding valid_def
-  proof
-    fix e
-    have "holds (e(x := e x)) cl" by (rule main)
-    then show "holds e cl" by simp
-  qed
-qed
+definition mk_suc :: "hterm \<Rightarrow> hterm" where "mk_suc t = Comb suc_c t"
+definition mk_pre :: "hterm \<Rightarrow> hterm" where "mk_pre t = Comb pre_c t"
+definition mk_add :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_add a b = Comb (Comb add_c a) b"
+definition mk_mul :: "hterm \<Rightarrow> hterm \<Rightarrow> hterm" where "mk_mul a b = Comb (Comb mul_c a) b"
 
-text \<open>Heuristic choice of induction variable: variables in recursive (first-argument)
-  positions of + and *, otherwise any variable.  Soundness does not depend on it.\<close>
+definition nm :: "string \<Rightarrow> hterm" where "nm s = Var s num_ty"
 
-fun rvs :: "trm \<Rightarrow> nat list" where
-  "rvs (TV x) = []"
-| "rvs TZ = []"
-| "rvs (TS t) = rvs t"
-| "rvs (TP a b) = (case a of TV x \<Rightarrow> [x] | _ \<Rightarrow> []) @ rvs a @ rvs b"
-| "rvs (TM a b) = (case a of TV x \<Rightarrow> [x] | _ \<Rightarrow> []) @ rvs a @ rvs b"
+definition ind_ax_tm :: hterm where
+  "ind_ax_tm =
+     (let P = Var ''P'' (fun_ty num_ty bool_ty); n = nm ''n'' in
+      mk_forall P
+        (mk_imp (mk_conj (Comb P zero_c)
+                         (mk_forall n (mk_imp (Comb P n) (Comb P (mk_suc n)))))
+                (mk_forall n (Comb P n))))"
 
-fun lrvs :: "lit \<Rightarrow> nat list" where
-  "lrvs (s, a, b) = rvs a @ rvs b"
+definition distinct_ax_tm :: hterm where
+  "distinct_ax_tm = mk_forall (nm ''n'') (mk_not (safe_mk_eq (mk_suc (nm ''n'')) zero_c))"
 
-definition ind_var :: "clause \<Rightarrow> nat option" where
-  "ind_var cl =
-     (case concat (map lrvs cl) @ cvars cl of [] \<Rightarrow> None | x # _ \<Rightarrow> Some x)"
+definition oneone_ax_tm :: hterm where
+  "oneone_ax_tm =
+     mk_forall (nm ''m'') (mk_forall (nm ''n'')
+       (safe_mk_eq (safe_mk_eq (mk_suc (nm ''m'')) (mk_suc (nm ''n''))) (safe_mk_eq (nm ''m'') (nm ''n''))))"
 
-definition induct :: "clause \<Rightarrow> clause list option" where
-  "induct cl = (case ind_var cl of
-                  None \<Rightarrow> None
-                | Some x \<Rightarrow> if x \<in> set (cvars cl) then Some (ind_goals x cl) else None)"
+definition pre_ax_tm :: hterm where
+  "pre_ax_tm = mk_forall (nm ''n'') (safe_mk_eq (mk_pre (mk_suc (nm ''n''))) (nm ''n''))"
 
-lemma induct_sound:
-  assumes "induct cl = Some cs" and "\<forall>c\<in>set cs. valid c"
-  shows "valid cl"
-proof -
-  obtain x where "ind_var cl = Some x"
-    using assms(1) by (cases "ind_var cl") (auto simp: induct_def)
-  with assms(1) have "x \<in> set (cvars cl)" "cs = ind_goals x cl"
-    by (auto simp: induct_def split: if_splits)
-  with assms(2) show ?thesis by (auto intro: ind_sound)
-qed
+definition add_ax_tm :: hterm where
+  "add_ax_tm =
+     mk_conj (mk_forall (nm ''n'') (safe_mk_eq (mk_add zero_c (nm ''n'')) (nm ''n'')))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_add (mk_suc (nm ''m'')) (nm ''n'')) (mk_suc (mk_add (nm ''m'') (nm ''n''))))))"
 
-section \<open>The prover and its soundness theorem\<close>
+definition mul_ax_tm :: hterm where
+  "mul_ax_tm =
+     mk_conj (mk_forall (nm ''n'') (safe_mk_eq (mk_mul zero_c (nm ''n'')) zero_c))
+             (mk_forall (nm ''m'') (mk_forall (nm ''n'')
+                (safe_mk_eq (mk_mul (mk_suc (nm ''m'')) (nm ''n''))
+                            (mk_add (nm ''n'') (mk_mul (nm ''m'') (nm ''n''))))))"
 
-text \<open>Fuel-bounded: every call of the waterfall (including the recursive pours after
-  induction) consumes fuel, so the function is total.  Clauses passing through the whole
-  waterfall without being proved form the pool and are handed to induction.\<close>
+text \<open>Build the theory of Peano arithmetic in the kernel: one new type, five constants and the
+  Peano axioms (including the defining equations of @{text "+"} and @{text "*"}).\<close>
 
-primrec prove :: "process list \<Rightarrow> nat \<Rightarrow> clause \<Rightarrow> bool" where
-  "prove ws 0 cl = False"
-| "prove ws (Suc n) cl =
-     (case pipeline ws cl of
-        Proved \<Rightarrow> True
-      | Refuted \<Rightarrow> False
-      | Subgoals cs \<Rightarrow> (\<forall>c\<in>set cs. prove ws n c)
-      | Pass \<Rightarrow> (case induct cl of
-                    None \<Rightarrow> False
-                  | Some cs \<Rightarrow> (\<forall>c\<in>set cs. prove ws n c)))"
+definition peano_init :: "(kstate \<times> hthm list) option" where
+  "peano_init =
+     do { k1 \<leftarrow> new_type bool_kstate (''num'', 0);
+          k2 \<leftarrow> new_constant k1 (''0'', num_ty);
+          k3 \<leftarrow> new_constant k2 (''SUC'', num1);
+          k4 \<leftarrow> new_constant k3 (''PRE'', num1);
+          k5 \<leftarrow> new_constant k4 (''+'', num2);
+          k6 \<leftarrow> new_constant k5 (''*'', num2);
+          (k7, t1) \<leftarrow> new_axiom k6 ind_ax_tm;
+          (k8, t2) \<leftarrow> new_axiom k7 distinct_ax_tm;
+          (k9, t3) \<leftarrow> new_axiom k8 oneone_ax_tm;
+          (k10, t4) \<leftarrow> new_axiom k9 pre_ax_tm;
+          (k11, t5) \<leftarrow> new_axiom k10 add_ax_tm;
+          (k12, t6) \<leftarrow> new_axiom k11 mul_ax_tm;
+          Some (k12, [t1, t2, t3, t4, t5, t6]) }"
 
-theorem prove_sound: "prove ws n cl \<Longrightarrow> valid cl"
-proof (induction n arbitrary: cl)
-  case 0
-  then show ?case by simp
-next
-  case (Suc n)
-  have so: "sound_out cl (pipeline ws cl)" by (rule pipeline_sound)
-  show ?case
-  proof (cases "pipeline ws cl")
-    case Proved
-    with so show ?thesis by simp
-  next
-    case Refuted
-    with Suc.prems show ?thesis by simp
-  next
-    case (Subgoals cs)
-    with Suc.prems have "\<forall>c\<in>set cs. prove ws n c" by simp
-    then have "\<forall>c\<in>set cs. valid c" using Suc.IH by blast
-    with so Subgoals show ?thesis by simp
-  next
-    case Pass
-    show ?thesis
-    proof (cases "induct cl")
-      case None
-      with Suc.prems Pass show ?thesis by simp
-    next
-      case (Some cs)
-      with Suc.prems Pass have "\<forall>c\<in>set cs. prove ws n c" by simp
-      then have "\<forall>c\<in>set cs. valid c" using Suc.IH by blast
-      with Some show ?thesis by (rule induct_sound)
-    qed
-  qed
-qed
+definition peano_thm :: "nat \<Rightarrow> hthm" where "peano_thm i = snd (the peano_init) ! i"
 
-corollary valid_by_waterfall:
-  "prove default_waterfall n cl \<Longrightarrow> valid cl"
-  by (rule prove_sound)
+definition nat_shell :: shell where
+  "nat_shell =
+     \<lparr> sh_name = ''num'', sh_ty = num_ty, sh_bottoms = [zero_c], sh_cons = [suc_c],
+       sh_accs = [pre_c], sh_type_axiom = None, sh_induct = peano_thm 0, sh_cases = None,
+       sh_distinct = [peano_thm 1], sh_oneone = [peano_thm 2], sh_accdefs = [peano_thm 3] \<rparr>"
 
-section \<open>Examples\<close>
+definition nat_rules :: "hthm list" where
+  "nat_rules = mk_rewrites_l (sh_distinct nat_shell @ sh_oneone nat_shell @ sh_accdefs nat_shell
+                              @ [peano_thm 4, peano_thm 5])"
 
-text \<open>x + 0 = x\<close>
-lemma plus_zero_right: "valid [(True, TP (TV 0) TZ, TV 0)]"
-  by (rule valid_by_waterfall[of 10]) (eval)
-
-text \<open>(x + y) + z = x + (y + z)\<close>
-lemma plus_assoc:
-  "valid [(True, TP (TP (TV 0) (TV 1)) (TV 2), TP (TV 0) (TP (TV 1) (TV 2)))]"
-  by (rule valid_by_waterfall[of 10]) (eval)
+definition nat_ctx :: "heur list \<Rightarrow> wctx" where
+  "nat_ctx order =
+     \<lparr> w_shells = [nat_shell], w_rules = nat_rules, w_glemmas = [], w_order = order,
+       w_maxdepth = 12, w_ncex = 5, w_rwfuel = 200 \<rparr>"
 
 end
