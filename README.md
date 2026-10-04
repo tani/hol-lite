@@ -91,11 +91,32 @@ the goal. Steps / inductions / generalizations:
 For `m * n = n * m` the Aderhold step generalizes `m * n` in
 `((m * n) + n') + SUC n'' = ((m * n) + n'') + SUC n'`, exactly the example of the paper.
 
+## Evaluation set
+
+`eval_set` (49+1 conjectures from HOL Light's arithmetic and list theory: `+`, `*`, `EXP`, `-`, `<=`,
+`<`, `EVEN`, `APPEND`, `REVERSE`, `LENGTH`) is given to BMF (`eval_report` prints, per theorem,
+success and steps/inductions/generalizations). BMF proves 32 of 50 (64%; the paper reports 47% for
+its first test set, whose theorem list is not reproduced here). The theorems proved are
+re-checked at build time (`eval_set_proved`). The 18 failures need lemmas the waterfall does not
+speculate (e.g. `SUC m ~= m` for `~(m < m)`, trichotomy, `m <= m + n`, `EVEN (m + n)`); the same
+kind of failure is reported in the paper (Section 5.2.1, failed proofs).
+
+Two fixes came out of the evaluation: the record of generalized terms is now scoped to the subtree
+below the generalization step (a global record blocked `REVERSE (APPEND x y)`, which is now
+proved), and `PRE 0 = 0` was missing from the Peano theory.
+
 ## Not covered
 
-The 145-theorem evaluation, existential quantifiers in the waterfall, the shell's cases and
-type-axiom theorems (stored but unused), and proofs *about* the kernel (consistency of the HOL
-Light logic is not mechanised here).
+* `ITAUT`/`MESON` and tactics with metavariables; the clause theorems are proved by the bootstrap
+  prover `BS_TAUT` instead of `ITAUT`.
+* `SELECT`/choice (`BOOL_CASES_AX` stays an axiom, by design), `define_type`/`ind_types`, the
+  numeral and `ARITH_RULE` machinery; `num` and lists are given by axioms for the shells.
+* The shell's cases and type-axiom theorems (stored but unused); quantifiers in the waterfall
+  (clauses are quantifier-free, as in the paper).
+* The 145-theorem evaluation of the paper (its theorem list is not in the arXiv text), and proofs
+  *about* the kernel (consistency of the HOL Light logic is not mechanised here).
+
+`h_setify` was checked against Section 4.3.3 of the paper (removal of duplicate disjuncts).
 
 ## Building
 
