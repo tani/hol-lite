@@ -2470,4 +2470,41 @@ definition TAUT_TAC :: tactic where
 definition TAUT :: "hterm \<Rightarrow> hthm option" where
   "TAUT tm = prove tm TAUT_TAC"
 
+
+section \<open>Clausal-form rewrite rules (proved by the ported TAUT)\<close>
+
+definition ptm :: hterm where "ptm = Var ''p'' bool_ty"
+definition qtm :: hterm where "qtm = Var ''q'' bool_ty"
+definition rtm :: hterm where "rtm = Var ''r'' bool_ty"
+
+definition cnf_rule_tms :: "hterm list" where
+  "cnf_rule_tms =
+     [ safe_mk_eq (mk_imp ptm qtm) (mk_disj (mk_not ptm) qtm),
+       safe_mk_eq (safe_mk_eq ptm qtm) (mk_conj (mk_disj (mk_not ptm) qtm) (mk_disj (mk_not qtm) ptm)),
+       safe_mk_eq (mk_not (mk_not ptm)) ptm,
+       safe_mk_eq (mk_not (mk_conj ptm qtm)) (mk_disj (mk_not ptm) (mk_not qtm)),
+       safe_mk_eq (mk_not (mk_disj ptm qtm)) (mk_conj (mk_not ptm) (mk_not qtm)),
+       safe_mk_eq (mk_disj ptm (mk_conj qtm rtm)) (mk_conj (mk_disj ptm qtm) (mk_disj ptm rtm)),
+       safe_mk_eq (mk_disj (mk_conj qtm rtm) ptm) (mk_conj (mk_disj qtm ptm) (mk_disj rtm ptm)),
+       safe_mk_eq (mk_disj (mk_disj ptm qtm) rtm) (mk_disj ptm (mk_disj qtm rtm)),
+       safe_mk_eq (mk_not T_tm) F_tm,
+       safe_mk_eq (mk_not F_tm) T_tm,
+       safe_mk_eq (mk_disj T_tm ptm) T_tm,
+       safe_mk_eq (mk_disj ptm T_tm) T_tm,
+       safe_mk_eq (mk_disj F_tm ptm) ptm,
+       safe_mk_eq (mk_disj ptm F_tm) ptm,
+       safe_mk_eq (mk_conj T_tm ptm) ptm,
+       safe_mk_eq (mk_conj ptm T_tm) ptm,
+       safe_mk_eq (mk_conj F_tm ptm) F_tm,
+       safe_mk_eq (mk_conj ptm F_tm) F_tm ]"
+
+definition cnf_rules :: "hthm list" where
+  "cnf_rules = List.map_filter TAUT cnf_rule_tms"
+
+definition cnf_conv :: "hterm \<Rightarrow> hthm option" where
+  "cnf_conv tm = PURE_REWRITE_CONV cnf_rules tm"
+
+definition mk_rewrites_l :: "hthm list \<Rightarrow> hthm list" where
+  "mk_rewrites_l ths = foldr mk_rewrites ths []"
+
 end
